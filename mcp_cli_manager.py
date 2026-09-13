@@ -596,7 +596,7 @@ def render_cli(data):
 
     # Header Box
     print(f"\n{CORAL}╭{'─' * (W - 2)}╮{RESET}")
-    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.0 (Surface & Depth Scanner){RESET}"
+    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.1 (Granular Server Control){RESET}"
     status_line = f"{GREEN}● ALL PORTS & PROCS ACTIVE{RESET}  "
     space_len = W - 2 - len_visible(title_line) - len_visible(status_line)
     print(f"{CORAL}│{RESET}{title_line}{' ' * max(0, space_len)}{status_line}{CORAL}│{RESET}")
