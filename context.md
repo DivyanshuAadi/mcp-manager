@@ -52,7 +52,25 @@ The **MCP 360° Engine** is a high-performance, standalone Windows CLI utility d
 - **Bug Fix**: Fixed `TypeError: object of type 'NoneType' has no len()` when inspecting servers configured without launch commands.
 - **Visual Repair**: Resolved text truncation on discovery source tags (e.g. `Antigravity IDE, Cla`).
 
-### 🔹 v3.2 — Sub-Second Responsive UI & Bulletproof Disabling (CURRENT)
+### 🔹 v3.3 — Machine Repos Toggle, Clean Zero-Residue Uninstall & Explorer Opener (CURRENT)
+- **Toggleable Local Machine Repos (`[T]`)**:
+  - Restored downloaded local repositories (`mcp-google-sheets`, `ScrapGraphAI`, `Use Browser`, `Graphify`) into the main table with `○ READY (D)` status.
+  - Added an interactive view toggle: press `[T]` to switch between **`Full 360° View`** (Agents + Local Repos) and **`Compact View`** (Configured Agents Only).
+  - Persisted user preference in `.mcp_prefs.json`.
+- **Clean Zero-Residue Uninstall (`[7]`)**:
+  - In the Granular Control Menu, option `[7]` performs a complete, 3-step permanent wipe:
+    1. Forcefully terminates any running worker processes and child trees (`taskkill /F /T`).
+    2. Strips the server definition from all 14 agent config files.
+    3. Recursively deletes the repository directory from disk using `robust_rmtree()` with `stat.S_IWRITE` permission handling, leaving zero leftover files, `.venv`, or `.git` residue.
+  - Also supported via CLI: `mcp-manager.bat uninstall <name>`.
+- **Open Server Folder in File Explorer (`[O]`)**:
+  - Added `[O]` to open the server's repository or script directory directly in Windows File Explorer via `explorer.exe`.
+  - For cloud servers, opens the URL in the browser.
+  - Also supported via CLI: `mcp-manager.bat open <name>`.
+- **Lingering Process State Transparency**:
+  - Servers running while disabled in config are explicitly flagged as `⊘ LINGERING` with active PIDs and RAM commit.
+
+### 🔹 v3.2 — Sub-Second Responsive UI & Bulletproof Disabling
 - **Eliminated 10-Second Freeze**:
   - *Root Cause*: In v3.1, `get_snapshot()` was probing 43 open TCP ports with 4 HTTP requests each (160 sequential requests with 0.15s timeouts), freezing the UI for 8–10s on every keystroke.
   - *Fix*: Normal snapshots now resolve listening ports by instant PID matching (`0.002s`). Full HTTP socket probing is restricted exclusively to `[P] Deep Port Audit`.
@@ -164,4 +182,4 @@ C:\Users\lenovo\Desktop\MCP Manager\
 ```
 
 ---
-*Generated: September 2026 | MCP 360° Engine v3.2 | Divyanshu Aadi*
+*Generated: September 2026 | MCP 360° Engine v3.3 | Divyanshu Aadi*

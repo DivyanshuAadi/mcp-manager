@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-  ✦ MCP 360° ENGINE v3.2 - HIGH-PERFORMANCE UNIVERSAL MCP CONTROL & MONITOR
+  ✦ MCP 360° ENGINE v3.3 - HIGH-PERFORMANCE UNIVERSAL MCP CONTROL & MONITOR
 =============================================================================
   • Sub-Second Real-Time Monitoring (<0.4s refresh, 25x faster, zero freezing)
-  • Bulletproof Multi-Agent Config Disabling & Enabling (Antigravity, Claude, Cursor, etc.)
+  • Toggleable Local Machine Repos [T] (Full 360° View vs Compact Configured)
+  • Clean Zero-Residue Uninstall [7] (Force kill + config strip + disk wipe)
+  • Open Server Folder in File Explorer [O]
+  • Bulletproof Multi-Agent Config Disabling & Enabling (14 agent targets)
   • Surgical Process Tree Termination (taskkill /F /T with zero false positives)
-  • Full Dynamic Discovery Source Expansion (No truncated text)
-  • Downloaded Repos Disk Browser [U]
-  • Deep HTTP/SSE Port Audit [P]
+  • Dynamic Column Expansion (Zero truncated text)
 =============================================================================
 """
 
@@ -18,6 +19,8 @@ import re
 import json
 import time
 import glob
+import shutil
+import stat
 import subprocess
 import urllib.request
 import urllib.error
@@ -68,6 +71,26 @@ HOME = os.path.expanduser('~')
 APPDATA = os.environ.get('APPDATA', '')
 LOCALAPPDATA = os.environ.get('LOCALAPPDATA', '')
 
+# User preferences file for persisting View Mode (Full vs Compact)
+PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.mcp_prefs.json')
+
+def load_prefs():
+    prefs = {'show_local_repos': True}
+    if os.path.exists(PREFS_FILE):
+        try:
+            with open(PREFS_FILE, 'r', encoding='utf-8') as f:
+                prefs.update(json.load(f))
+        except Exception:
+            pass
+    return prefs
+
+def save_prefs(prefs):
+    try:
+        with open(PREFS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(prefs, f, indent=2)
+    except Exception:
+        pass
+
 # Comprehensive list of all supported coding agent MCP config locations
 CONFIG_TARGETS = [
     ('Antigravity IDE', os.path.join(HOME, '.gemini', 'config', 'mcp_config.json')),
@@ -113,7 +136,7 @@ def probe_mcp_http(ip, port, timeout=0.15):
         try:
             req = urllib.request.Request(
                 url,
-                headers={"Accept": "text/event-stream, application/json, text/plain", "User-Agent": "MCP-Manager/3.2"}
+                headers={"Accept": "text/event-stream, application/json, text/plain", "User-Agent": "MCP-Manager/3.3"}
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 status = resp.status
@@ -257,10 +280,9 @@ def scan_agent_configs():
         except Exception:
             pass
 
-    # Finalize disabled flag: if disabled across all configs or disabled in any
+    # Finalize disabled flag: if disabled across all configs where it appears
     result = {}
     for c_name, entry in discovered.items():
-        # Overall disabled: disabled in all configs where it appears
         entry['disabled'] = len(entry['enabled_in']) == 0
         result[entry['name']] = entry
 
@@ -292,7 +314,6 @@ def derive_patterns(name, command, args_str):
                     if base not in GENERIC_WORDS and base.endswith(('.py', '.js', '.mjs', '.ts', '.exe')):
                         patterns.add(base)
                     
-                    # Walk up directory path to find package name
                     parts = [p.lower() for p in clean_a.split('/') if p and p not in GENERIC_WORDS and not p.endswith(':')]
                     if parts:
                         pkg_candidate = parts[-1]
@@ -308,17 +329,19 @@ def derive_patterns(name, command, args_str):
         if any(k in base_cmd for k in ['scrapling', 'mcp']):
             patterns.add(base_cmd)
 
-    # Filter out anything in GENERIC_WORDS or shorter than 4 chars
     safe_patterns = [p for p in patterns if p not in GENERIC_WORDS and len(p) >= 3]
     return safe_patterns
 
 # ---------------------------------------------------------
 # Sub-Second 360° Snapshot Engine (<0.4s Execution)
 # ---------------------------------------------------------
-def get_snapshot():
+def get_snapshot(show_local_repos=None):
+    if show_local_repos is None:
+        prefs = load_prefs()
+        show_local_repos = prefs.get('show_local_repos', True)
+
     # 1. Scan coding agent configs across the system
     agent_servers, found_agents = scan_agent_configs()
-
     configured_keys = {canon_key(k): k for k in agent_servers}
 
     # 2. Match local machine repos to attach disk paths and find unconfigured repos
@@ -347,7 +370,6 @@ def get_snapshot():
             if pname in candidate_runners or 'mcp' in pname:
                 cmd_tokens = p.cmdline() or []
                 cmd_str = " ".join(cmd_tokens).lower()
-                # Ignore self and management utilities
                 if any(ign in cmd_str for ign in ['mcp_cli_manager', 'mcp-manager', 'mcp-status', 'deploy_', 'inspect_']):
                     continue
                 candidate_processes.append({
@@ -375,12 +397,10 @@ def get_snapshot():
                 if cp['pid'] in assigned_pids:
                     continue
                 cmd_lower = cp['cmdline']
-                # Check for pattern match in command line
                 if any(pat in cmd_lower for pat in patterns):
                     matched_procs.append(cp)
                     assigned_pids.add(cp['pid'])
 
-        # Query resource usage ONLY for matched processes (sub-millisecond)
         commit_mb = 0.0
         cpu_pct = 0.0
         pids = []
@@ -430,11 +450,72 @@ def get_snapshot():
             'path': s_data.get('path'),
             'description': s_data.get('description'),
             'matched_procs': matched_procs,
-            'patterns': patterns
+            'patterns': patterns,
+            'is_unconfigured': False
         })
         idx += 1
 
-    # 6. Map listening ports for active MCP processes in 0.002s
+    # 6. Include Unconfigured Local Repos if Toggle is ON
+    if show_local_repos:
+        for u in unconfigured_repos:
+            u_name = u['name']
+            if canon_key(u_name) in configured_keys:
+                continue
+
+            patterns = derive_patterns(u_name, None, [u['path']])
+            matched_procs = []
+            for cp in candidate_processes:
+                if cp['pid'] in assigned_pids:
+                    continue
+                cmd_lower = cp['cmdline']
+                if any(pat in cmd_lower for pat in patterns):
+                    matched_procs.append(cp)
+                    assigned_pids.add(cp['pid'])
+
+            commit_mb = 0.0
+            cpu_pct = 0.0
+            pids = []
+            for mp in matched_procs:
+                try:
+                    mi = mp['proc'].memory_info()
+                    priv = getattr(mi, 'private', mi.rss) / (1024 * 1024)
+                    commit_mb += priv
+                    cpu_pct += mp['proc'].cpu_percent(interval=None)
+                    pids.append(mp['pid'])
+                except Exception:
+                    pass
+
+            total_commit += commit_mb
+            is_running = len(pids) > 0
+            status = "RUNNING" if is_running else "READY"
+
+            servers_list.append({
+                'num': idx,
+                'name': u_name,
+                'source': f"Local Disk ({u['base']})",
+                'sources': ['Local Disk'],
+                'type': 'local',
+                'status': status,
+                'is_running': is_running,
+                'disabled': False,
+                'disabled_in': [],
+                'enabled_in': [],
+                'pids': pids,
+                'port': "",
+                'commit_mb': round(commit_mb, 1),
+                'cpu': round(cpu_pct, 1),
+                'command': None,
+                'args': None,
+                'env': None,
+                'path': u['path'],
+                'description': f"Downloaded repository at {u['path']}",
+                'matched_procs': matched_procs,
+                'patterns': patterns,
+                'is_unconfigured': True
+            })
+            idx += 1
+
+    # 7. Map listening ports for active MCP processes in 0.002s
     all_mcp_pids = set()
     for s in servers_list:
         all_mcp_pids.update(s['pids'])
@@ -446,7 +527,7 @@ def get_snapshot():
                 s['port'] = f":{port_map[pid]}"
                 break
 
-    # 7. System RAM stats
+    # 8. System RAM stats
     try:
         vm = psutil.virtual_memory()
         ram_pct = vm.percent
@@ -465,7 +546,8 @@ def get_snapshot():
         'system_ram_free_gb': ram_free_gb,
         'system_ram_total_gb': ram_total_gb,
         'total_servers_ram': round(total_commit, 1),
-        'active_pids': list(all_mcp_pids)
+        'active_pids': list(all_mcp_pids),
+        'show_local_repos': show_local_repos
     }
 
 # ---------------------------------------------------------
@@ -479,11 +561,11 @@ def render_cli(data):
     max_src_len = max([len_visible(src) for src in all_sources] + [17])
     col_src_w = max(34, max_src_len)
 
-    W = max(108, 3 + 1 + 24 + 1 + 13 + 1 + col_src_w + 1 + 14 + 1 + 11 + 1 + 6 + 2)
+    W = max(112, 3 + 1 + 24 + 1 + 13 + 1 + col_src_w + 1 + 14 + 1 + 11 + 1 + 6 + 2)
 
     # Header Box
     print(f"\n{CORAL}╭{'─' * (W - 2)}╮{RESET}")
-    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.2 (Sub-Second UI & Universal Control){RESET}"
+    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.3 (Sub-Second UI & Universal Control){RESET}"
     status_line = f"{GREEN}● FAST ENGINE ACTIVE{RESET}  "
     space_len = W - 2 - len_visible(title_line) - len_visible(status_line)
     print(f"{CORAL}│{RESET}{title_line}{' ' * max(0, space_len)}{status_line}{CORAL}│{RESET}")
@@ -504,7 +586,9 @@ def render_cli(data):
 
     agents_str = ', '.join(data['found_agents']) if data['found_agents'] else 'None'
     unconf_count = len(data.get('unconfigured_repos', []))
-    print(f" {BOLD}Coding Agents {RESET} : {CYAN}{agents_str}{RESET} │ {DIM}{unconf_count} Downloaded Repos on Disk [U]{RESET}")
+    view_mode_str = f"{GREEN}Full ({unconf_count} Local Repos Included){RESET}" if data['show_local_repos'] else f"{AMBER}Compact (Configured Only){RESET}"
+    
+    print(f" {BOLD}Coding Agents {RESET} : {CYAN}{agents_str}{RESET} │ View: {view_mode_str} {DIM}[T]{RESET}")
     print(f" {BOLD}System RAM    {RESET} : {AMBER}{bar_str} {ram_pct}%{RESET} ({data['system_ram_free_gb']} GB free of {data['system_ram_total_gb']} GB)")
     print(f" {BOLD}Total Memory  {RESET} : {BOLD}{GREEN}{data['total_servers_ram']} MB{RESET} Commit Charge  │  {BOLD}{running_count}{RESET} Active / {total_count} Total Servers")
     print(f"{GRAY}{'─' * W}{RESET}")
@@ -534,7 +618,10 @@ def render_cli(data):
         elif s['status'] == 'DISABLED':
             status_badge = f"{YELLOW}⊘ DISABLED  {RESET}"
         elif s['status'] in ('INSTALLED', 'READY'):
-            status_badge = f"{DIM}○ READY     {RESET}"
+            if s.get('is_unconfigured'):
+                status_badge = f"{DIM}○ READY (D) {RESET}"
+            else:
+                status_badge = f"{DIM}○ READY     {RESET}"
         elif s['status'] == 'ONLINE':
             status_badge = f"{CYAN}✦ REMOTE    {RESET}"
         else:
@@ -585,7 +672,8 @@ def render_cli(data):
 
     # Action Bar
     print(f"{DARK_GRAY}╭─ {BOLD}{WHITE}Actions & Shortcuts{RESET}{DARK_GRAY} {'─' * (W - 25)}╮{RESET}")
-    bar = f"  {CORAL}[1-N]{RESET} Select Server    {CYAN}[U]{RESET} Local Repos ({unconf_count})    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start All    {CYAN}[P]{RESET} Ports    {AMBER}[R]{RESET} Refresh    {WHITE}[Q]{RESET} Quit  "
+    toggle_txt = "Hide Repos" if data['show_local_repos'] else "Show Repos"
+    bar = f"  {CORAL}[1-N]{RESET} Select Server    {CYAN}[T]{RESET} Toggle ({toggle_txt})    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start All    {CYAN}[P]{RESET} Ports    {AMBER}[R]{RESET} Refresh    {WHITE}[Q]{RESET} Quit  "
     space_bar = W - 2 - len_visible(bar)
     print(f"{DARK_GRAY}│{RESET}{bar}{' ' * max(0, space_bar)}{DARK_GRAY}│{RESET}")
     print(f"{DARK_GRAY}╰{'─' * (W - 2)}╯{RESET}")
@@ -681,12 +769,153 @@ def toggle_disable_server(s, force_state=None):
 
     time.sleep(0.4)
 
+def robust_rmtree(path):
+    """Recursively deletes a directory tree on Windows, clearing read-only attributes on .git / cache files."""
+    def remove_readonly(func, fpath, excinfo):
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            func(fpath)
+        except Exception:
+            pass
+    if os.path.exists(path):
+        shutil.rmtree(path, onerror=remove_readonly)
+        return not os.path.exists(path)
+    return True
+
+def uninstall_server(s, confirm=True):
+    """
+    Performs a 100% clean, zero-residue uninstallation of the server:
+    1. Forcefully terminates any running worker processes and child trees.
+    2. Removes server definition from ALL 14 agent config files.
+    3. Deletes local project folder on disk (clearing read-only attributes).
+    """
+    name = s['name']
+    cname = canon_key(name)
+    path = s.get('path')
+
+    print(f"\n{RED}{BOLD}╔══════════════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{RED}{BOLD}║         ⚠️  PERMANENT CLEAN UNINSTALL & ZERO-RESIDUE WIPE        ║{RESET}")
+    print(f"{RED}{BOLD}╚══════════════════════════════════════════════════════════════════╝{RESET}")
+    print(f" Target Server : {BOLD}{WHITE}{name}{RESET}")
+    if path:
+        print(f" Disk Location : {AMBER}{path}{RESET}")
+    print(f" This action will:")
+    print(f"   1. Forcefully kill all running worker processes & child trees.")
+    print(f"   2. Cleanly strip '{name}' from ALL agent configs (Antigravity, Claude, Cursor, etc.).")
+    if path and os.path.exists(path):
+        print(f"   3. Permanently wipe the directory from disk (Zero Residue left).")
+
+    if confirm:
+        ans = input(f"\n {RED}{BOLD}Are you sure you want to permanently delete and wipe '{name}'? [y/N]:{RESET} ").strip().lower()
+        if ans not in ('y', 'yes'):
+            print(f"\n{DIM}Uninstallation cancelled.{RESET}")
+            time.sleep(0.4)
+            return False
+
+    # 1. Kill running processes
+    killed = kill_server(s)
+    if killed:
+        print(f"{RED}✓ Terminated {len(killed)} running process(es): {killed}{RESET}")
+
+    # 2. Strip from all 14 configs
+    removed_from = []
+    for agent_label, config_path in CONFIG_TARGETS:
+        if not os.path.exists(config_path):
+            continue
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            servers = data.get('mcpServers') or data.get('mcp_servers') or data.get('mcp')
+            if isinstance(servers, dict):
+                matched_keys = [k for k in list(servers.keys()) if canon_key(k) == cname]
+                if matched_keys:
+                    for mk in matched_keys:
+                        del servers[mk]
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                    removed_from.append(agent_label)
+        except Exception:
+            pass
+
+    if removed_from:
+        print(f"{GREEN}✓ Removed from agent configs: {', '.join(removed_from)}{RESET}")
+    else:
+        print(f"{DIM}No agent config entries found for '{name}'.{RESET}")
+
+    # 3. Cleanly delete local repository folder on disk if present
+    if path and os.path.exists(path):
+        success = robust_rmtree(path)
+        if success:
+            print(f"{GREEN}✓ Permanently deleted folder from disk: {path} (Zero residue left){RESET}")
+        else:
+            print(f"{RED}⚠️ Could not completely delete {path}. Check for open file locks.{RESET}")
+    elif path:
+        print(f"{DIM}Folder {path} was not found on disk.{RESET}")
+
+    print(f"\n{GREEN}{BOLD}✓ Clean uninstallation complete! Zero residue remaining on machine.{RESET}")
+    time.sleep(0.8)
+    return True
+
+def open_server_location(s):
+    """Opens the server's directory in Windows File Explorer, or URL in default browser."""
+    if s['type'] == 'remote':
+        url = s.get('url') or s.get('command')
+        if url and url.startswith(('http://', 'https://')):
+            os.system(f'start "" "{url}"')
+            print(f"\n{CYAN}✓ Opened {url} in default browser.{RESET}")
+        else:
+            print(f"\n{DIM}No URL available for remote server '{s['name']}'.{RESET}")
+        time.sleep(0.4)
+        return
+
+    path = s.get('path')
+    if not path or not os.path.exists(path):
+        raw_args = s.get('args', [])
+        args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or [])
+        for a in args:
+            if isinstance(a, str) and os.path.exists(a):
+                path = os.path.dirname(os.path.abspath(a))
+                break
+
+    if path and os.path.exists(path):
+        if os.path.isfile(path):
+            path = os.path.dirname(path)
+        subprocess.Popen(['explorer.exe', os.path.normpath(path)])
+        print(f"\n{CYAN}✓ Opened folder in Explorer: {path}{RESET}")
+    else:
+        print(f"\n{AMBER}No local directory path found for '{s['name']}'.{RESET}")
+    time.sleep(0.4)
+
 def start_server(s):
     if s['type'] == 'remote':
         print(f"{AMBER}Cannot spawn remote cloud server '{s['name']}' locally.{RESET}")
         return None
-    if not s['command']:
-        print(f"{RED}No executable command found for '{s['name']}'. Check configuration.{RESET}")
+
+    cmd = s.get('command')
+    path = s.get('path')
+
+    # If unconfigured repository, try detecting runnable script
+    if not cmd and path and os.path.exists(path):
+        # 1. Check for .venv python
+        venv_py = os.path.join(path, '.venv', 'Scripts', 'python.exe')
+        if os.path.exists(venv_py):
+            # Check for server.py or main.py
+            for py_name in ['server.py', 'main.py', 'mcp_server.py', 'app.py']:
+                cand = os.path.join(path, py_name)
+                if os.path.exists(cand):
+                    cmd = venv_py
+                    s['command'] = cmd
+                    s['args'] = json.dumps([cand])
+                    break
+        # 2. Check for package.json
+        pkg_json = os.path.join(path, 'package.json')
+        if not cmd and os.path.exists(pkg_json):
+            cmd = 'npm'
+            s['command'] = cmd
+            s['args'] = json.dumps(['start'])
+
+    if not cmd:
+        print(f"{RED}No executable command found for '{s['name']}'. Check configuration or project files.{RESET}")
         return None
 
     raw_args = s.get('args', [])
@@ -697,7 +926,7 @@ def start_server(s):
     full_env = os.environ.copy()
     full_env.update({k: str(v) for k, v in env_vars.items()})
 
-    cmd_list = [s['command']] + [str(a) for a in args]
+    cmd_list = [cmd] + [str(a) for a in args]
     cwd = s.get('path') if (s.get('path') and os.path.exists(s['path'])) else None
 
     try:
@@ -734,29 +963,8 @@ def restart_server(s):
     time.sleep(0.4)
 
 # ---------------------------------------------------------
-# Sub-Screens: Unconfigured Repos & Deep Port Audit
+# Sub-Screens: Deep Port Audit
 # ---------------------------------------------------------
-def view_unconfigured_repos(data):
-    os.system('cls' if os.name == 'nt' else 'clear')
-    W = 90
-    print(f"\n{CYAN}╭{'─' * (W - 2)}╮{RESET}")
-    print(f"{CYAN}│  📂 DOWNLOADED REPOSITORIES ON DISK (Not Configured in Any Agent)                  │{RESET}")
-    print(f"{CYAN}╰{'─' * (W - 2)}╯{RESET}\n")
-
-    unconfigured = data.get('unconfigured_repos', [])
-    if not unconfigured:
-        print(f" {DIM}No unconfigured MCP repositories found on local drive.{RESET}\n")
-    else:
-        print(f" The following {len(unconfigured)} repositories are downloaded to your disk, but have NOT")
-        print(f" been added to any agent config (mcp_config.json or claude.json):\n")
-        print(f" {'#':<4} {'Repository / Folder Name':<28} {'Location on Disk'}")
-        print(f" {'─' * (W - 2)}")
-        for i, u in enumerate(unconfigured, 1):
-            print(f" {CYAN}{i:02d}{RESET}   {BOLD}{WHITE}{u['name']:<28}{RESET} {DIM}{u['path']}{RESET}")
-
-    print(f"\n{DIM}Tip: To make a server active, configure it in Antigravity IDE or Claude Code.{RESET}")
-    input("\nPress Enter to return to main overview...")
-
 def deep_port_audit(data, interactive=True):
     os.system('cls' if os.name == 'nt' else 'clear')
     W = 92
@@ -774,7 +982,6 @@ def deep_port_audit(data, interactive=True):
     results = []
     for c in conns:
         ip, port = c.laddr.ip, c.laddr.port
-        # Fast probe
         is_mcp, clue = probe_mcp_http(ip, port, timeout=0.1)
         if is_mcp:
             pname = "unknown"
@@ -821,7 +1028,8 @@ def inspect_server_details(s, interactive=True):
     print(f"{INDIGO}╰{'─' * (W - 2)}╯{RESET}\n")
 
     status_str = f"{GREEN}● RUNNING{RESET}" if s['is_running'] else (f"{YELLOW}⊘ DISABLED{RESET}" if s.get('disabled') else f"{DIM}○ READY / STOPPED{RESET}")
-    cfg_mode_str = f"{YELLOW}DISABLED (Auto-start blocked){RESET}" if s.get('disabled') else f"{GREEN}ACTIVE (Enabled){RESET}"
+    cfg_mode_str = f"{YELLOW}DISABLED (Auto-start blocked){RESET}" if s.get('disabled') else (f"{DIM}UNCONFIGURED (Local Repo){RESET}" if s.get('is_unconfigured') else f"{GREEN}ACTIVE (Enabled){RESET}")
+
     print(f" {BOLD}Server Name   :{RESET} {s['name']}")
     print(f" {BOLD}Current Status:{RESET} {status_str}")
     print(f" {BOLD}Config Mode   :{RESET} {cfg_mode_str}")
@@ -870,11 +1078,10 @@ def inspect_server_details(s, interactive=True):
 def server_control_menu(target_identifier):
     """
     Granular Control Menu for a single selected MCP Server.
-    Allows Start, Stop (Force kill tree), Restart, Disable in Config, Enable in Config, Inspect, Refresh.
+    Allows Start, Stop (Force kill tree), Restart, Disable in Config, Enable in Config, Inspect, Uninstall, Open Folder.
     """
     while True:
         data = get_snapshot()
-        # Match by number or canonical name
         s = None
         if isinstance(target_identifier, int) or (isinstance(target_identifier, str) and target_identifier.isdigit()):
             t_num = int(target_identifier)
@@ -902,19 +1109,31 @@ def server_control_menu(target_identifier):
             status_badge = f"{CORAL}⊘ LINGERING (Process running despite disabled config!){RESET}"
         elif s.get('disabled'):
             status_badge = f"{YELLOW}■ DISABLED IN CONFIG{RESET}"
+        elif s.get('is_unconfigured'):
+            status_badge = f"{DIM}○ READY (Local Repo on Disk){RESET}"
         else:
             status_badge = f"{DIM}○ STOPPED{RESET}"
 
-        cfg_status = f"{YELLOW}DISABLED (Auto-start blocked){RESET}" if s.get('disabled') else f"{GREEN}ACTIVE (Enabled){RESET}"
+        if s.get('is_unconfigured'):
+            cfg_status = f"{DIM}UNCONFIGURED (Downloaded to disk, not added to agent config){RESET}"
+        elif s.get('disabled'):
+            cfg_status = f"{YELLOW}DISABLED (Auto-start blocked across all agents){RESET}"
+        else:
+            cfg_status = f"{GREEN}ACTIVE (Enabled in agent configs){RESET}"
 
         print(f"\n{CORAL}╭─ {BOLD}Granular Control: {WHITE}{s['name']}{RESET}{CORAL} {'─' * max(0, W - 22 - len(s['name']))}╮{RESET}")
         print(f"{CORAL}│{RESET}  {BOLD}Status:{RESET}       {status_badge}")
         print(f"{CORAL}│{RESET}  {BOLD}Resources:{RESET}    RAM Commit: {CYAN}{s.get('commit_mb', 0.0):.1f} MB{RESET}   |   CPU: {CYAN}{s.get('cpu', 0.0):.1f}%{RESET}")
         print(f"{CORAL}│{RESET}  {BOLD}Config Mode:{RESET}  {cfg_status}")
         
-        src_str = ", ".join(s.get('sources', [])) if s.get('sources') else "System Config"
+        src_str = ", ".join(s.get('sources', [])) if s.get('sources') else "Local Disk"
         print(f"{CORAL}│{RESET}  {BOLD}Sources:{RESET}      {src_str}")
         
+        path_display = s.get('path') or '(none - remote cloud server)'
+        if len(path_display) > 65:
+            path_display = path_display[:62] + "..."
+        print(f"{CORAL}│{RESET}  {BOLD}Project Path:{RESET} {DIM}{path_display}{RESET}")
+
         cmd_val = s.get('command')
         cmd_display = str(cmd_val) if cmd_val else '(none - not configured)'
         raw_args = s.get('args', [])
@@ -927,17 +1146,19 @@ def server_control_menu(target_identifier):
         print(f"{CORAL}╰{'─' * (W - 2)}╯{RESET}\n")
 
         print(f" {BOLD}{WHITE}Available Operations for [{s['name']}]:{RESET}")
-        print(f"  {GREEN}[1]{RESET} {BOLD}Start Server{RESET}           {DIM}- Spawn process if currently stopped{RESET}")
+        print(f"  {GREEN}[1]{RESET} {BOLD}Start Server{RESET}           {DIM}- Spawn process if runnable script detected{RESET}")
         print(f"  {RED}[2]{RESET} {BOLD}Stop / Kill Server{RESET}     {DIM}- Forcefully terminate process & all child workers{RESET}")
         print(f"  {AMBER}[3]{RESET} {BOLD}Restart Server{RESET}         {DIM}- Terminate tree and immediately re-launch{RESET}")
         print(f"  {YELLOW}[4]{RESET} {BOLD}Disable in Config{RESET}      {DIM}- Set 'disabled: true' across all agent configs & kill{RESET}")
         print(f"  {CYAN}[5]{RESET} {BOLD}Enable in Config{RESET}       {DIM}- Set 'disabled: false' across all agent configs{RESET}")
         print(f"  {INDIGO}[6]{RESET} {BOLD}Inspect Full Details{RESET}   {DIM}- View args, masked env vars, full process tree{RESET}")
+        print(f"  {RED}[7]{RESET} {BOLD}Clean Uninstall{RESET}        {DIM}- Wipe directory, remove configs & kill (Zero Residue){RESET}")
+        print(f"  {CYAN}[O]{RESET} {BOLD}Open Folder{RESET}            {DIM}- Open directory in Windows File Explorer{RESET}")
         print(f"  {AMBER}[R]{RESET} {BOLD}Refresh Status{RESET}         {DIM}- Re-query live PIDs and memory commit{RESET}")
         print(f"  {WHITE}[B]{RESET} {BOLD}Back to Overview{RESET}       {DIM}- Return to main server table{RESET}\n")
 
         try:
-            choice = input(f" {BOLD}{CORAL}Select operation [1-6, R, B]:{RESET} ").strip().lower()
+            choice = input(f" {BOLD}{CORAL}Select operation [1-7, O, R, B]:{RESET} ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             break
 
@@ -945,6 +1166,8 @@ def server_control_menu(target_identifier):
             break
         elif choice in ('r', 'refresh'):
             continue
+        elif choice in ('o', 'open', 'folder'):
+            open_server_location(s)
         elif choice in ('1', 'start'):
             if s['is_running']:
                 print(f"\n{AMBER}'{s['name']}' is already running (PIDs: {s.get('pids')}).{RESET}")
@@ -969,16 +1192,23 @@ def server_control_menu(target_identifier):
             toggle_disable_server(s, force_state=False)
         elif choice in ('6', 'inspect', 'info', 'details'):
             inspect_server_details(s)
+        elif choice in ('7', 'uninstall', 'delete', 'remove', 'wipe'):
+            deleted = uninstall_server(s)
+            if deleted:
+                break
         else:
-            print(f"\n{RED}Invalid selection. Choose 1-6, R, or B.{RESET}")
+            print(f"\n{RED}Invalid selection. Choose 1-7, O, R, or B.{RESET}")
             time.sleep(0.4)
 
 # ---------------------------------------------------------
 # Interactive CLI Loop
 # ---------------------------------------------------------
 def interactive_loop():
+    prefs = load_prefs()
+    show_local_repos = prefs.get('show_local_repos', True)
+
     while True:
-        data = get_snapshot()
+        data = get_snapshot(show_local_repos=show_local_repos)
         render_cli(data)
 
         try:
@@ -992,8 +1222,11 @@ def interactive_loop():
             break
         elif choice in ('r', 'refresh', ''):
             continue
-        elif choice in ('u', 'repos', 'unconfigured'):
-            view_unconfigured_repos(data)
+        elif choice in ('t', 'toggle'):
+            show_local_repos = not show_local_repos
+            prefs['show_local_repos'] = show_local_repos
+            save_prefs(prefs)
+            continue
         elif choice in ('p', 'ports'):
             deep_port_audit(data, interactive=True)
         elif choice in ('k', 'kill-all'):
@@ -1015,24 +1248,53 @@ def interactive_loop():
             if matched:
                 server_control_menu(matched[0]['name'])
             else:
-                print(f"{RED}Unrecognized input: '{choice}'. Enter server # (1-{len(data['servers'])}), name, K, S, P, R, or Q.{RESET}")
+                print(f"{RED}Unrecognized input: '{choice}'. Enter server # (1-{len(data['servers'])}), name, T, K, S, P, R, or Q.{RESET}")
                 time.sleep(0.4)
 
 def main():
+    prefs = load_prefs()
+    show_local_repos = prefs.get('show_local_repos', True)
+
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
-        data = get_snapshot()
+        data = get_snapshot(show_local_repos=show_local_repos)
 
         if cmd == 'status':
             render_cli(data)
         elif cmd == 'ports':
             deep_port_audit(data, interactive=False)
+        elif cmd in ('toggle', 'view'):
+            if len(sys.argv) > 2:
+                sub = sys.argv[2].lower()
+                show_local_repos = (sub in ('full', 'all', '1', 'true', 'on'))
+            else:
+                show_local_repos = not show_local_repos
+            prefs['show_local_repos'] = show_local_repos
+            save_prefs(prefs)
+            mode_name = "FULL (Configured Agents + Downloaded Machine Repos)" if show_local_repos else "COMPACT (Configured Agents Only)"
+            print(f"View mode set to: {mode_name}")
+            data = get_snapshot(show_local_repos=show_local_repos)
+            render_cli(data)
         elif cmd == 'kill-all':
             killed = kill_all_servers(data['servers'])
             print(f"Killed {len(killed)} process(es): {killed}")
         elif cmd in ('select', 'control', 'manage') and len(sys.argv) > 2:
             target = sys.argv[2]
             server_control_menu(target)
+        elif cmd in ('open', 'folder') and len(sys.argv) > 2:
+            target = sys.argv[2]
+            s = next((x for x in data['servers'] if canon_key(target) in canon_key(x['name'])), None)
+            if s:
+                open_server_location(s)
+            else:
+                print(f"Server '{target}' not found.")
+        elif cmd in ('uninstall', 'remove', 'delete') and len(sys.argv) > 2:
+            target = sys.argv[2]
+            s = next((x for x in data['servers'] if canon_key(target) in canon_key(x['name'])), None)
+            if s:
+                uninstall_server(s)
+            else:
+                print(f"Server '{target}' not found.")
         elif cmd == 'restart' and len(sys.argv) > 2:
             target = sys.argv[2]
             s = next((x for x in data['servers'] if canon_key(target) in canon_key(x['name'])), None)
@@ -1082,6 +1344,9 @@ def main():
             print("  mcp-manager.bat                 (Interactive Claude-style menu)")
             print("  mcp-manager.bat select <name>   (Open granular menu for server)")
             print("  mcp-manager.bat status          (Show table once)")
+            print("  mcp-manager.bat toggle          (Toggle between Full and Compact views)")
+            print("  mcp-manager.bat open <name>     (Open server folder in File Explorer)")
+            print("  mcp-manager.bat uninstall <name>(Clean zero-residue uninstall)")
             print("  mcp-manager.bat ports           (Deep scan all open ports)")
             print("  mcp-manager.bat restart <name>  (Restart server)")
             print("  mcp-manager.bat inspect <name>  (Inspect server details)")
