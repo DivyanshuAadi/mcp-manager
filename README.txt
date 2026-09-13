@@ -1,12 +1,16 @@
-✦ MCP 360° ENGINE (v3.1)
+✦ MCP 360° ENGINE (v3.2)
 ===========================
 
 Double-click to use:
 1. mcp-manager.bat  -> Interactive Claude-styled menu with Granular Server Control.
-2. mcp-status.bat   -> Quick 1-second status table of all running MCP servers and RAM usage.
+2. mcp-status.bat   -> Quick sub-second status table of all running MCP servers and RAM usage.
 
-What's New in v3.1:
-- Granular Control Menu: Select any server by # (1-N) or name to open dedicated operations:
+What's New in v3.2:
+- Sub-Second Performance (<0.4s Refresh): Eliminated 10-second UI freezing.
+- Bulletproof Disabling: Toggles 'disabled: true' across all agent configs and terminates workers.
+- Zero False Positives: No false matches with Brave Browser or system processes.
+- Dynamic Source Column: Full visibility without text cutoff.
+- Granular Control Menu:
   [1] Start Server
   [2] Stop / Kill Server (force process tree kill)
   [3] Restart Server (clean tree-kill + fresh spawn)
@@ -18,6 +22,7 @@ What's New in v3.1:
 
 Main Table Shortcuts:
 - [1-N] : Select Server to open its Granular Control Menu
+- [U]   : Downloaded Repos on Disk
 - [K]   : Kill All Running MCP Servers
 - [S]   : Start All Stopped Servers
 - [P]   : Deep Port Audit (view every open port on host)
