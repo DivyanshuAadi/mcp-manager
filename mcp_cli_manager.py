@@ -36,6 +36,7 @@ UNDERLINE = f'{ESC}4m'
 # Theme Colors
 CORAL = f'{ESC}38;2;249;115;22m'      # Anthropic Orange / Coral
 AMBER = f'{ESC}38;2;245;158;11m'      # Warning / Accent Amber
+YELLOW = AMBER                         # Yellow Alias
 GREEN = f'{ESC}38;2;16;185;129m'      # Success / Running Emerald Green
 CYAN = f'{ESC}38;2;56;189;248m'       # Info / Port Sky Blue
 PURPLE = f'{ESC}38;2;168;85;247m'     # Purple Accent
@@ -265,6 +266,7 @@ def scan_installed_machine_servers():
 def scan_agent_configs():
     """Dynamically reads MCP configs across all installed coding agents."""
     targets = [
+        ('Antigravity IDE', os.path.join(HOME, '.gemini', 'config', 'mcp_config.json')),
         ('Claude Code', os.path.join(HOME, '.claude.json')),
         ('Claude Global', os.path.join(HOME, '.claude', 'mcp.json')),
         ('Claude Desktop', os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')),
@@ -296,15 +298,18 @@ def scan_agent_configs():
                 for sname, sdata in servers.items():
                     if not isinstance(sdata, dict):
                         continue
+                    is_disabled = bool(sdata.get('disabled', False))
                     if sname in discovered:
                         if agent_name not in discovered[sname]['source']:
                             discovered[sname]['source'] += f", {agent_name}"
+                        if is_disabled:
+                            discovered[sname]['disabled'] = True
                         continue
 
                     cmd = sdata.get('command')
                     args = sdata.get('args', [])
                     env = sdata.get('env', {})
-                    url = sdata.get('url')
+                    url = sdata.get('url') or sdata.get('serverUrl')
 
                     stype = 'remote' if url and not cmd else 'local'
                     discovered[sname] = {
@@ -314,6 +319,7 @@ def scan_agent_configs():
                         'command': cmd,
                         'args': json.dumps(args) if isinstance(args, list) else args,
                         'env': json.dumps(env) if isinstance(env, dict) else env,
+                        'disabled': is_disabled,
                         'description': f"Configured in {agent_name}"
                     }
         except Exception:
@@ -395,6 +401,8 @@ def get_snapshot():
             if not s.get('command') and existing.get('command'):
                 s['command'] = existing['command']
                 s['args'] = existing['args']
+            if existing.get('disabled') or s.get('disabled'):
+                s['disabled'] = True
             del master_catalog[existing_name]
             master_catalog[name] = s
             canon_map[ck] = name
@@ -453,7 +461,15 @@ def get_snapshot():
                         assigned_pids.add(p['pid'])
 
         is_running = len(matched) > 0
-        status = "ONLINE" if s_type == 'remote' else ("RUNNING" if is_running else "INSTALLED")
+        is_disabled = bool(s_data.get('disabled', False))
+        if s_type == 'remote':
+            status = "ONLINE"
+        elif is_running:
+            status = "RUNNING"
+        elif is_disabled:
+            status = "DISABLED"
+        else:
+            status = "READY"
 
         commit_mb = sum(p['ram_commit_mb'] for p in matched)
         cpu = sum(p['cpu'] for p in matched)
@@ -475,6 +491,7 @@ def get_snapshot():
             'type': s_type,
             'status': status,
             'is_running': is_running,
+            'disabled': is_disabled,
             'pids': pids,
             'port': ports_str,
             'commit_mb': round(commit_mb, 1),
@@ -628,7 +645,9 @@ def render_cli(data):
 
         if s['status'] == 'RUNNING':
             status_badge = f"{GREEN}● RUNNING{RESET}"
-        elif s['status'] == 'INSTALLED':
+        elif s['status'] == 'DISABLED':
+            status_badge = f"{YELLOW}⊘ DISABLED{RESET}"
+        elif s['status'] in ('INSTALLED', 'READY'):
             status_badge = f"{DIM}○ READY  {RESET}"
         elif s['status'] == 'ONLINE':
             status_badge = f"{CYAN}✦ REMOTE {RESET}"
@@ -676,11 +695,11 @@ def render_cli(data):
         print(row_str)
 
     print(f"{GRAY}{'─' * W}{RESET}")
-    print(f"{DIM}Tip: Ready servers were auto-discovered from your local tools drive (even if not configured in any agent).{RESET}\n")
+    print(f"{DIM}Tip: If a server auto-starts when using an IDE or agent, use [D] to Disable it in config.{RESET}\n")
 
     # Action Bar
     print(f"{DARK_GRAY}╭─ {BOLD}{WHITE}Actions & Shortcuts{RESET}{DARK_GRAY} {'─' * (W - 25)}╮{RESET}")
-    bar = f"  {CORAL}[1-N]{RESET} Toggle Server    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start All    {CYAN}[P]{RESET} Deep Port Audit    {AMBER}[R]{RESET} Refresh    {WHITE}[Q]{RESET} Quit  "
+    bar = f"  {CORAL}[1-N]{RESET} Toggle    {YELLOW}[D]{RESET} Disable/Enable    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start    {CYAN}[P]{RESET} Ports    {WHITE}[Q]{RESET} Quit  "
     space_bar = W - 2 - len_visible(bar)
     print(f"{DARK_GRAY}│{RESET}{bar}{' ' * max(0, space_bar)}{DARK_GRAY}│{RESET}")
     print(f"{DARK_GRAY}╰{'─' * (W - 2)}╯{RESET}")
@@ -688,29 +707,94 @@ def render_cli(data):
 # ---------------------------------------------------------
 # Control Operations
 # ---------------------------------------------------------
+def kill_pid_tree(pid):
+    """Forcefully terminates a PID and all its child/grandchild processes on Windows."""
+    if os.name == 'nt':
+        res = subprocess.run(f"taskkill /F /T /PID {pid}", shell=True, capture_output=True, text=True)
+        return res.returncode == 0
+    else:
+        try:
+            parent = psutil.Process(pid)
+            for child in parent.children(recursive=True):
+                child.kill()
+            parent.kill()
+            return True
+        except Exception:
+            return False
+
 def kill_server(server_obj):
+    """Kills a server and its entire process tree, leaving zero orphaned node/python workers."""
     killed = []
     for pid in server_obj.get('pids', []):
         try:
-            p = psutil.Process(pid)
-            p.kill()
+            kill_pid_tree(pid)
             killed.append(pid)
         except Exception:
             pass
 
-    patterns = server_obj.get('patterns', [server_obj['name'].lower()])
+    patterns = list(server_obj.get('patterns', [server_obj['name'].lower()]))
+    s_clean = server_obj['name'].lower().replace('_', '-').replace('-mcp', '').replace('_mcp', '')
+    patterns.extend([s_clean, f"server-{s_clean}", f"mcp-server-{s_clean}"])
+
     for p in psutil.process_iter(['pid', 'cmdline']):
         try:
             cmd = " ".join(p.info['cmdline'] or [])
             if any(pat in cmd.lower() for pat in patterns):
-                if not any(ign in cmd.lower() for ign in ['mcp_cli_manager', 'mcp-manager', 'mcp-status']):
-                    p.kill()
+                if not any(ign in cmd.lower() for ign in ['mcp_cli_manager', 'mcp-manager', 'mcp-status', 'deploy_', 'inspect_']):
+                    kill_pid_tree(p.info['pid'])
                     if p.info['pid'] not in killed:
                         killed.append(p.info['pid'])
         except Exception:
             pass
 
     return killed
+
+def toggle_disable_server(s, force_state=None):
+    """Toggles 'disabled': true/false in agent configs so supervisors will NOT auto-start the server."""
+    name = s['name']
+    currently_disabled = s.get('disabled', False)
+    new_disabled = not currently_disabled if force_state is None else force_state
+
+    targets = [
+        os.path.join(HOME, '.gemini', 'config', 'mcp_config.json'),
+        os.path.join(HOME, '.claude.json'),
+        os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json'),
+        os.path.join(HOME, '.cursor', 'mcp.json'),
+        os.path.join(HOME, '.codeium', 'windsurf', 'mcp_config.json'),
+        os.path.join(os.getcwd(), '.vscode', 'mcp.json'),
+        os.path.join(os.getcwd(), 'mcp.json')
+    ]
+    updated_files = []
+    for path in targets:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            servers = data.get('mcpServers') or data.get('mcp_servers') or data.get('mcp')
+            if isinstance(servers, dict):
+                matched_key = None
+                for k in servers:
+                    if k.lower() == name.lower() or k.lower().replace('-mcp', '') == name.lower().replace('-mcp', ''):
+                        matched_key = k
+                        break
+                if matched_key:
+                    servers[matched_key]['disabled'] = new_disabled
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                    updated_files.append(os.path.basename(path))
+        except Exception:
+            pass
+
+    if new_disabled:
+        killed = kill_server(s)
+        print(f"\n{YELLOW}Disabled '{name}' in: {', '.join(updated_files) if updated_files else 'config'}.{RESET}")
+        print(f"{DIM}Terminated process tree ({len(killed)} PIDs: {killed}). Server will NOT auto-start.{RESET}")
+    else:
+        print(f"\n{GREEN}Enabled '{name}' in: {', '.join(updated_files) if updated_files else 'config'}.{RESET}")
+        print(f"{DIM}Server is now enabled and ready to run on demand.{RESET}")
+
+    time.sleep(1.6)
 
 def start_server(s):
     if s['type'] == 'remote':
@@ -719,6 +803,10 @@ def start_server(s):
     if not s['command']:
         print(f"{RED}No executable command found for '{s['name']}'. Check pyproject.toml or package.json.{RESET}")
         return None
+
+    # If it was disabled, auto-enable it upon start
+    if s.get('disabled'):
+        toggle_disable_server(s, force_state=False)
 
     cmd = s['command']
     args = json.loads(s['args'] or '[]') if isinstance(s['args'], str) else (s['args'] or [])
@@ -807,11 +895,40 @@ def interactive_loop():
             time.sleep(1.2)
         elif choice == 's':
             for s in data['servers']:
-                if s['type'] != 'remote' and not s['is_running']:
+                if s['type'] != 'remote' and not s['is_running'] and not s.get('disabled'):
                     pid = start_server(s)
                     if pid:
                         print(f"{GREEN}Started '{s['name']}' (PID {pid}){RESET}")
             time.sleep(1.2)
+        elif choice == 'd' or choice.startswith('d ') or choice.startswith('disable ') or choice.startswith('enable '):
+            parts = choice.split()
+            t_idx = -1
+            if len(parts) > 1 and parts[1].isdigit():
+                t_idx = int(parts[1])
+            elif len(parts) > 1:
+                query = parts[1].lower()
+                m = next((x for x in data['servers'] if query in x['name'].lower()), None)
+                if m:
+                    t_idx = m['num']
+            else:
+                try:
+                    val = input(f" {BOLD}{YELLOW}Enter server # or name to toggle Disable/Enable:{RESET} ").strip()
+                    if val.isdigit():
+                        t_idx = int(val)
+                    else:
+                        m = next((x for x in data['servers'] if val.lower() in x['name'].lower()), None)
+                        if m:
+                            t_idx = m['num']
+                except Exception:
+                    continue
+
+            s_target = next((x for x in data['servers'] if x['num'] == t_idx), None)
+            if s_target:
+                force = True if choice.startswith('disable ') else (False if choice.startswith('enable ') else None)
+                toggle_disable_server(s_target, force_state=force)
+            else:
+                print(f"{RED}Server not found.{RESET}")
+                time.sleep(1)
         elif choice.isdigit():
             idx = int(choice)
             matched = [s for s in data['servers'] if s['num'] == idx]
@@ -826,14 +943,15 @@ def interactive_loop():
             elif s['is_running']:
                 killed = kill_server(s)
                 print(f"\n{RED}Stopped '{s['name']}' (Killed PIDs: {killed}){RESET}")
-                time.sleep(1.2)
+                print(f"{DIM}Tip: If it auto-restarts when using an IDE/agent, press [D] to Disable it.{RESET}")
+                time.sleep(1.5)
             else:
                 pid = start_server(s)
                 if pid:
                     print(f"\n{GREEN}Started '{s['name']}' (New PID: {pid}){RESET}")
                 time.sleep(1.2)
         else:
-            print(f"{RED}Unrecognized command. Enter 1-N, K, S, P, R, or Q.{RESET}")
+            print(f"{RED}Unrecognized command. Enter 1-N, D, K, S, P, R, or Q.{RESET}")
             time.sleep(1)
 
 def main():
@@ -864,14 +982,30 @@ def main():
                 print(f"Started '{s['name']}' (PID {pid})")
             else:
                 print(f"Server '{target}' not found.")
+        elif cmd == 'disable' and len(sys.argv) > 2:
+            target = sys.argv[2]
+            s = next((x for x in data['servers'] if target.lower() in x['name'].lower()), None)
+            if s:
+                toggle_disable_server(s, force_state=True)
+            else:
+                print(f"Server '{target}' not found.")
+        elif cmd == 'enable' and len(sys.argv) > 2:
+            target = sys.argv[2]
+            s = next((x for x in data['servers'] if target.lower() in x['name'].lower()), None)
+            if s:
+                toggle_disable_server(s, force_state=False)
+            else:
+                print(f"Server '{target}' not found.")
         else:
             print("Usage:")
-            print("  mcp-manager.bat              (Interactive Claude-style menu)")
-            print("  mcp-manager.bat status       (Show table once)")
-            print("  mcp-manager.bat ports        (Deep scan all open ports)")
-            print("  mcp-manager.bat kill <name>  (Kill specific server)")
-            print("  mcp-manager.bat kill-all     (Kill all servers)")
-            print("  mcp-manager.bat start <name> (Start specific server)")
+            print("  mcp-manager.bat                 (Interactive Claude-style menu)")
+            print("  mcp-manager.bat status          (Show table once)")
+            print("  mcp-manager.bat ports           (Deep scan all open ports)")
+            print("  mcp-manager.bat disable <name>  (Disable server in config & kill process)")
+            print("  mcp-manager.bat enable <name>   (Enable server in config)")
+            print("  mcp-manager.bat kill <name>     (Kill specific server)")
+            print("  mcp-manager.bat kill-all        (Kill all servers)")
+            print("  mcp-manager.bat start <name>    (Start specific server)")
     else:
         interactive_loop()
 
