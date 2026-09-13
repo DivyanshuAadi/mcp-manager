@@ -1,4 +1,4 @@
-# ✦ MCP 360° ENGINE (v3.3)
+# ✦ MCP 360° ENGINE (v3.5)
 ### Sub-Second Responsive UI, Toggleable Machine Repos, Zero-Residue Clean Uninstall & File Explorer Opener
 
 A standalone, high-performance CLI utility for Windows styled after the **Claude Code CLI** (Anthropic Coral/Emerald palette, rounded box framing, and pixel-perfect ANSI alignment). 
@@ -7,7 +7,7 @@ Zero dependency on third-party daemon apps like MCP Router. Pure on-demand, non-
 
 ---
 
-## ⚡ What's New in v3.3: Machine Repos Toggle, Clean Uninstall & Explorer Opener
+## ⚡ What's New in v3.5: Machine Repos Toggle, Clean Uninstall & Explorer Opener
 
 1. **Toggleable Local Machine Repos (`[T]`)**:
    - Easily switch between **`Full 360° View`** (showing both configured agent servers and unconfigured downloaded repos on disk) and **`Compact View`** (configured coding agent servers only).
@@ -70,7 +70,8 @@ Selecting any server by number (`1-N`) or name opens its dedicated control inter
   [6] Inspect Full Details   - View args, masked env vars, full process tree
   [7] Clean Uninstall        - Wipe directory, remove configs & kill (Zero Residue)
   [O] Open Folder            - Open directory in Windows File Explorer
-  [R] Refresh Status         - Re-query live PIDs and memory commit
+  [R] Refresh
+- [F] **Repair Configs**: Auto-detects and repairs malformed agent JSON files with .bak backups. Status         - Re-query live PIDs and memory commit
   [B] Back to Overview       - Return to main server table
 ```
 
@@ -83,7 +84,7 @@ Double-click **`mcp-manager.bat`**:
 
 ```text
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│  ✦ MCP 360° ENGINE  v3.3 (Sub-Second UI & Universal Control)                                     ● FAST ENGINE ACTIVE  │
+│  ✦ MCP 360° ENGINE  v3.5 (Sub-Second UI & Universal Control)                                     ● FAST ENGINE ACTIVE  │
 │  Universal Coding Agent Inspector & Process Controller                                                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  Coding Agents  : Antigravity IDE, Claude Code, Claude Desktop, Claude Global │ View: Full (4 Local Repos Included) [T]
@@ -108,7 +109,8 @@ Double-click **`mcp-manager.bat`**:
 Tip: Enter server # (01-12) or name to open Granular Control Menu.
 
 ╭─ Actions & Shortcuts ─────────────────────────────────────────────────────────────────────────────────────────────────╮
-│  [1-N] Select Server    [T] Toggle (Hide Repos)    [K] Kill All    [S] Start All    [P] Ports    [R] Refresh    [Q] Quit  │
+│  [1-N] Select Server    [T] Toggle (Hide Repos)    [K] Kill All    [S] Start All    [P] Ports    [R] Refresh
+- [F] **Repair Configs**: Auto-detects and repairs malformed agent JSON files with .bak backups.    [Q] Quit  │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
