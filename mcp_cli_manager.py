@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-  ✦ MCP 360° ENGINE v3.3 - HIGH-PERFORMANCE UNIVERSAL MCP CONTROL & MONITOR
+  ✦ MCP 360° ENGINE v3.4 - HIGH-PERFORMANCE UNIVERSAL MCP CONTROL & MONITOR
 =============================================================================
   • Sub-Second Real-Time Monitoring (<0.4s refresh, 25x faster, zero freezing)
   • Toggleable Local Machine Repos [T] (Full 360° View vs Compact Configured)
@@ -173,11 +173,21 @@ def get_mcp_listening_ports(mcp_pids):
 # ---------------------------------------------------------
 # LAYER 2: Filesystem Repository Inspector
 # ---------------------------------------------------------
+def normalize_mcp_key(name):
+    clean = name.lower()
+    for prefix in ['@modelcontextprotocol/server-', '@modelcontextprotocol/', 'server-', 'mcp-']:
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):]
+    for suffix in ['-mcp', '_mcp', '-server', '_server']:
+        if clean.endswith(suffix):
+            clean = clean[:-len(suffix)]
+    return clean.replace('-', '').replace('_', '').replace(' ', '').replace('@', '').replace('/', '')
+
 def scan_machine_repos(configured_canon_keys):
     """
-    Scans local developer directories:
+    Scans local developer directories & NPX cache directories:
     - Resolves local project directories for configured servers.
-    - Gathers downloaded repos that have not yet been added to any agent config.
+    - Gathers downloaded repos & NPX cached packages (e.g. chrome-devtools-mcp) that have not yet been added to any agent config.
     """
     search_dirs = [
         r'D:\Tools & MCP\Local',
@@ -190,6 +200,10 @@ def scan_machine_repos(configured_canon_keys):
     unconfigured = []
     seen = set()
 
+    # Normalized configured set for accurate matching
+    norm_configured = {normalize_mcp_key(k) for k in configured_canon_keys}
+
+    # 1. Developer directories
     for dpattern in search_dirs:
         for base in glob.glob(dpattern):
             if not os.path.isdir(base):
@@ -204,21 +218,87 @@ def scan_machine_repos(configured_canon_keys):
                     continue
                 seen.add(full)
                 c_item = canon_key(item)
-                if c_item in configured_canon_keys:
+                n_item = normalize_mcp_key(item)
+
+                if c_item in configured_canon_keys or n_item in norm_configured:
                     matched_paths[c_item] = full
+                    matched_paths[n_item] = full
                 else:
                     if 'mcp' in item.lower() or 'local' in base.lower() or item in ('Graphify', 'ScrapGraphAI', 'Use Browser'):
                         unconfigured.append({
                             'name': item,
                             'path': full,
-                            'base': base
+                            'base': base,
+                            'source': 'Local Disk'
                         })
+
+    # 2. NPX Cache directories (%LOCALAPPDATA%\npm-cache\_npx)
+    npx_dirs = [
+        os.path.expandvars(r'%LOCALAPPDATA%\npm-cache\_npx'),
+        os.path.expanduser(r'~/.npm/_npx')
+    ]
+    seen_npx = set()
+    for npx_base in npx_dirs:
+        if not os.path.exists(npx_base):
+            continue
+        try:
+            hash_dirs = os.listdir(npx_base)
+        except Exception:
+            continue
+        for hash_dir in hash_dirs:
+            hash_path = os.path.join(npx_base, hash_dir)
+            nm = os.path.join(hash_path, 'node_modules')
+            if not os.path.isdir(nm) or hash_path in seen:
+                continue
+            try:
+                pkgs = os.listdir(nm)
+            except Exception:
+                continue
+            for pkg in pkgs:
+                if pkg.startswith('.'):
+                    continue
+                pkg_path = os.path.join(nm, pkg)
+                candidate_list = []
+                if pkg.startswith('@'):
+                    try:
+                        sub_pkgs = os.listdir(pkg_path)
+                        for sub in sub_pkgs:
+                            candidate_list.append((f"{pkg}/{sub}", sub, os.path.join(pkg_path, sub)))
+                    except Exception:
+                        pass
+                else:
+                    candidate_list.append((pkg, pkg, pkg_path))
+
+                for full_pkg_name, display_name, target_pkg_path in candidate_list:
+                    c_pkg = canon_key(display_name)
+                    c_full = canon_key(full_pkg_name)
+                    n_pkg = normalize_mcp_key(display_name)
+                    n_full = normalize_mcp_key(full_pkg_name)
+
+                    if (c_pkg in configured_canon_keys or n_pkg in norm_configured) and c_pkg not in matched_paths:
+                        matched_paths[c_pkg] = hash_path
+                    elif (c_full in configured_canon_keys or n_full in norm_configured) and c_full not in matched_paths:
+                        matched_paths[c_full] = hash_path
+                    else:
+                        is_relevant = (
+                            'mcp' in full_pkg_name.lower() or 
+                            'devtools' in full_pkg_name.lower() or 
+                            'server' in full_pkg_name.lower()
+                        )
+                        if is_relevant and n_pkg not in norm_configured and n_full not in norm_configured:
+                            key_id = f"npx_{n_full}"
+                            if key_id not in seen_npx:
+                                seen_npx.add(key_id)
+                                unconfigured.append({
+                                    'name': display_name if not full_pkg_name.startswith('@') else full_pkg_name,
+                                    'path': hash_path,
+                                    'base': 'NPX Cache',
+                                    'source': 'NPX Cache'
+                                })
 
     return matched_paths, unconfigured
 
-# ---------------------------------------------------------
-# LAYER 3: Dynamic Multi-Agent Config Harvester
-# ---------------------------------------------------------
+
 def scan_agent_configs():
     """Dynamically reads MCP configs across all installed coding agents."""
     discovered = {}
@@ -565,7 +645,7 @@ def render_cli(data):
 
     # Header Box
     print(f"\n{CORAL}╭{'─' * (W - 2)}╮{RESET}")
-    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.3 (Sub-Second UI & Universal Control){RESET}"
+    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.4 (Sub-Second UI & NPX Cache Manager){RESET}"
     status_line = f"{GREEN}● FAST ENGINE ACTIVE{RESET}  "
     space_len = W - 2 - len_visible(title_line) - len_visible(status_line)
     print(f"{CORAL}│{RESET}{title_line}{' ' * max(0, space_len)}{status_line}{CORAL}│{RESET}")

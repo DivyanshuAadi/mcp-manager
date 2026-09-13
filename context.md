@@ -52,7 +52,7 @@ The **MCP 360° Engine** is a high-performance, standalone Windows CLI utility d
 - **Bug Fix**: Fixed `TypeError: object of type 'NoneType' has no len()` when inspecting servers configured without launch commands.
 - **Visual Repair**: Resolved text truncation on discovery source tags (e.g. `Antigravity IDE, Cla`).
 
-### 🔹 v3.3 — Machine Repos Toggle, Clean Zero-Residue Uninstall & Explorer Opener (CURRENT)
+### 🔹 v3.4 — Machine Repos Toggle, Clean Zero-Residue Uninstall & Explorer Opener (CURRENT)
 - **Toggleable Local Machine Repos (`[T]`)**:
   - Restored downloaded local repositories (`mcp-google-sheets`, `ScrapGraphAI`, `Use Browser`, `Graphify`) into the main table with `○ READY (D)` status.
   - Added an interactive view toggle: press `[T]` to switch between **`Full 360° View`** (Agents + Local Repos) and **`Compact View`** (Configured Agents Only).
@@ -182,4 +182,4 @@ C:\Users\lenovo\Desktop\MCP Manager\
 ```
 
 ---
-*Generated: September 2026 | MCP 360° Engine v3.3 | Divyanshu Aadi*
+*Generated: September 2026 | MCP 360° Engine v3.4 | Divyanshu Aadi*
