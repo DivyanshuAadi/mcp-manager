@@ -499,6 +499,9 @@ def get_snapshot():
             'command': s_data.get('command'),
             'args': s_data.get('args'),
             'env': s_data.get('env'),
+            'path': s_data.get('path'),
+            'description': s_data.get('description'),
+            'matched_procs': matched,
             'patterns': patterns
         })
         idx += 1
@@ -695,11 +698,11 @@ def render_cli(data):
         print(row_str)
 
     print(f"{GRAY}{'─' * W}{RESET}")
-    print(f"{DIM}Tip: If a server auto-starts when using an IDE or agent, use [D] to Disable it in config.{RESET}\n")
+    print(f"{DIM}Tip: Enter server # (01-{len(data['servers']):02d}) or name to open its Granular Control Menu.{RESET}\n")
 
     # Action Bar
     print(f"{DARK_GRAY}╭─ {BOLD}{WHITE}Actions & Shortcuts{RESET}{DARK_GRAY} {'─' * (W - 25)}╮{RESET}")
-    bar = f"  {CORAL}[1-N]{RESET} Toggle    {YELLOW}[D]{RESET} Disable/Enable    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start    {CYAN}[P]{RESET} Ports    {WHITE}[Q]{RESET} Quit  "
+    bar = f"  {CORAL}[1-N]{RESET} Select Server    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start All    {CYAN}[P]{RESET} Ports    {AMBER}[R]{RESET} Refresh    {WHITE}[Q]{RESET} Quit  "
     space_bar = W - 2 - len_visible(bar)
     print(f"{DARK_GRAY}│{RESET}{bar}{' ' * max(0, space_bar)}{DARK_GRAY}│{RESET}")
     print(f"{DARK_GRAY}╰{'─' * (W - 2)}╯{RESET}")
@@ -868,6 +871,201 @@ def deep_port_audit(data, interactive=True):
     if interactive:
         input("\nPress Enter to return to main menu...")
 
+def restart_server(s):
+    """Cleanly restarts an MCP server: forcefully kills existing process tree, clears disable flag if needed, pauses, and re-spawns."""
+    print(f"\n{AMBER}Restarting '{s['name']}'...{RESET}")
+    killed = kill_server(s)
+    if killed:
+        print(f"{DIM}Stopped existing process tree (PIDs: {killed}){RESET}")
+    time.sleep(1.0)
+    pid = start_server(s)
+    if pid:
+        print(f"{GREEN}✓ '{s['name']}' restarted successfully (New PID: {pid}){RESET}")
+    else:
+        print(f"{RED}Failed to restart '{s['name']}'. Check server configuration.{RESET}")
+    time.sleep(1.5)
+    return pid
+
+def mask_secret(val):
+    if not isinstance(val, str):
+        return str(val)
+    if len(val) <= 8:
+        return "****"
+    return f"{val[:4]}...{val[-3:]}"
+
+def inspect_server_details(s, interactive=True):
+    """Deep diagnostic view for a single server: arguments, environment, config paths, process hierarchy."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+    W = 86
+    print(f"\n{CYAN}╭─ {BOLD}DIAGNOSTIC INSPECTION: {s['name']}{RESET}{CYAN} {'─' * max(0, W - 26 - len(s['name']))}╮{RESET}")
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}Server Name:{RESET}       {s['name']}")
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}Protocol Type:{RESET}     {s.get('type', 'stdio').upper()}")
+    
+    st_text = f"{GREEN}● RUNNING{RESET}" if s['is_running'] else f"{DIM}○ STOPPED{RESET}"
+    if s.get('disabled'):
+        st_text += f" {YELLOW}[DISABLED in Config]{RESET}"
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}Live Status:{RESET}       {st_text}")
+
+    # Process metrics
+    pids = s.get('pids', [])
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}Active PIDs:{RESET}       {pids if pids else 'None'}")
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}RAM Commit (MB):{RESET}  {s.get('ram_commit_mb', 0.0):.1f} MB")
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}CPU Usage (%):{RESET}    {s.get('cpu_percent', 0.0):.1f}%")
+
+    # Command & Execution
+    cmd = s.get('command') or '(none)'
+    print(f"{CYAN}│{RESET} {BOLD}{WHITE}Command / Binary:{RESET}  {cmd}")
+
+    raw_args = s.get('args', [])
+    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or [])
+    if args:
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Arguments:{RESET}         {' '.join(str(a) for a in args)}")
+    else:
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Arguments:{RESET}         (none)")
+
+    # Environment
+    raw_env = s.get('env', {})
+    env_dict = json.loads(raw_env) if isinstance(raw_env, str) else (raw_env or {})
+    if env_dict:
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Environment Vars:{RESET}")
+        for k, v in env_dict.items():
+            masked = mask_secret(v)
+            print(f"{CYAN}│{RESET}   {DARK_GRAY}•{RESET} {k} = {masked}")
+    else:
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Environment Vars:{RESET}  (none defined)")
+
+    # Config Sources & Project Paths
+    srcs = s.get('sources', [])
+    if srcs:
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Config Sources:{RESET}    {', '.join(srcs)}")
+    if s.get('path'):
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Local Project Path:{RESET} {s.get('path')}")
+
+    # Process Tree if running
+    if pids:
+        print(f"{CYAN}│{RESET}")
+        print(f"{CYAN}│{RESET} {BOLD}{WHITE}Process Tree Details:{RESET}")
+        for pid in pids:
+            try:
+                p = psutil.Process(pid)
+                pname = p.name()
+                pcmd = " ".join(p.cmdline()[:4])
+                print(f"{CYAN}│{RESET}   {GREEN}PID {pid:<6}{RESET} {pname:<16} {DIM}{pcmd}{RESET}")
+                for child in p.children(recursive=True):
+                    cname = child.name()
+                    ccmd = " ".join(child.cmdline()[:4])
+                    print(f"{CYAN}│{RESET}     └─ {CYAN}PID {child.pid:<6}{RESET} {cname:<14} {DIM}{ccmd}{RESET}")
+            except Exception:
+                pass
+
+    print(f"{CYAN}╰{'─' * (W - 2)}╯{RESET}\n")
+    if interactive:
+        input(" Press Enter to return to Server Control Menu...")
+
+def server_control_menu(target_identifier):
+    """
+    Granular Control Menu for a single selected MCP Server.
+    Allows Start, Stop (Force kill tree), Restart, Disable in Config, Enable in Config, Inspect, Refresh.
+    """
+    while True:
+        data = get_snapshot()
+        # Match by name or number
+        s = None
+        if isinstance(target_identifier, int) or (isinstance(target_identifier, str) and target_identifier.isdigit()):
+            t_num = int(target_identifier)
+            s = next((x for x in data['servers'] if x['num'] == t_num), None)
+        else:
+            q = str(target_identifier).lower()
+            s = next((x for x in data['servers'] if q == x['name'].lower()), None)
+            if not s:
+                s = next((x for x in data['servers'] if q in x['name'].lower()), None)
+
+        if not s:
+            print(f"\n{RED}Server '{target_identifier}' not found.{RESET}")
+            time.sleep(1.2)
+            break
+
+        # Re-assign target_identifier to exact canonical name so refreshes preserve selection
+        target_identifier = s['name']
+
+        os.system('cls' if os.name == 'nt' else 'clear')
+        W = 86
+
+        # Header Badge
+        if s['is_running']:
+            status_badge = f"{GREEN}● RUNNING{RESET}  (PIDs: {s.get('pids', [])})"
+        elif s.get('disabled'):
+            status_badge = f"{YELLOW}■ DISABLED IN CONFIG{RESET}"
+        else:
+            status_badge = f"{DIM}○ STOPPED{RESET}"
+
+        cfg_status = f"{YELLOW}DISABLED (Auto-start blocked){RESET}" if s.get('disabled') else f"{GREEN}ACTIVE (Enabled){RESET}"
+
+        print(f"\n{CORAL}╭─ {BOLD}Granular Control: {WHITE}{s['name']}{RESET}{CORAL} {'─' * max(0, W - 22 - len(s['name']))}╮{RESET}")
+        print(f"{CORAL}│{RESET}  {BOLD}Status:{RESET}       {status_badge}")
+        print(f"{CORAL}│{RESET}  {BOLD}Resources:{RESET}    RAM Commit: {CYAN}{s.get('ram_commit_mb', 0.0):.1f} MB{RESET}   |   CPU: {CYAN}{s.get('cpu_percent', 0.0):.1f}%{RESET}")
+        print(f"{CORAL}│{RESET}  {BOLD}Config Mode:{RESET}  {cfg_status}")
+        
+        src_str = ", ".join(s.get('sources', [])) if s.get('sources') else "System Config"
+        print(f"{CORAL}│{RESET}  {BOLD}Sources:{RESET}      {src_str}")
+        
+        cmd_display = s.get('command', '(none)')
+        raw_args = s.get('args', [])
+        args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or [])
+        if args:
+            cmd_display += " " + " ".join(str(a) for a in args)
+        if len(cmd_display) > 60:
+            cmd_display = cmd_display[:57] + "..."
+        print(f"{CORAL}│{RESET}  {BOLD}Command:{RESET}      {DIM}{cmd_display}{RESET}")
+        print(f"{CORAL}╰{'─' * (W - 2)}╯{RESET}\n")
+
+        print(f" {BOLD}{WHITE}Available Operations for [{s['name']}]:{RESET}")
+        print(f"  {GREEN}[1]{RESET} {BOLD}Start Server{RESET}           {DIM}- Spawn process if currently stopped{RESET}")
+        print(f"  {RED}[2]{RESET} {BOLD}Stop / Kill Server{RESET}     {DIM}- Forcefully terminate process & all child workers{RESET}")
+        print(f"  {AMBER}[3]{RESET} {BOLD}Restart Server{RESET}         {DIM}- Terminate tree and immediately re-launch{RESET}")
+        print(f"  {YELLOW}[4]{RESET} {BOLD}Disable in Config{RESET}      {DIM}- Set 'disabled: true' so IDE/agents won't auto-start it{RESET}")
+        print(f"  {CYAN}[5]{RESET} {BOLD}Enable in Config{RESET}       {DIM}- Set 'disabled: false' to allow on-demand agent use{RESET}")
+        print(f"  {INDIGO}[6]{RESET} {BOLD}Inspect Full Details{RESET}   {DIM}- View args, masked env vars, full process tree{RESET}")
+        print(f"  {AMBER}[R]{RESET} {BOLD}Refresh Status{RESET}         {DIM}- Re-query live PIDs and memory commit{RESET}")
+        print(f"  {WHITE}[B]{RESET} {BOLD}Back to Overview{RESET}       {DIM}- Return to main server table{RESET}\n")
+
+        try:
+            choice = input(f" {BOLD}{CORAL}Select operation [1-6, R, B]:{RESET} ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        if choice in ('b', 'back', 'q', 'exit'):
+            break
+        elif choice in ('r', 'refresh'):
+            continue
+        elif choice in ('1', 'start'):
+            if s['is_running']:
+                print(f"\n{AMBER}'{s['name']}' is already running (PIDs: {s.get('pids')}).{RESET}")
+                time.sleep(1.2)
+            else:
+                pid = start_server(s)
+                if pid:
+                    print(f"\n{GREEN}✓ Started '{s['name']}' (New PID: {pid}){RESET}")
+                time.sleep(1.5)
+        elif choice in ('2', 'stop', 'kill'):
+            killed = kill_server(s)
+            if killed:
+                print(f"\n{RED}✓ Stopped '{s['name']}' (Forcefully terminated PIDs: {killed}){RESET}")
+            else:
+                print(f"\n{DIM}'{s['name']}' was not running.{RESET}")
+            time.sleep(1.5)
+        elif choice in ('3', 'restart'):
+            restart_server(s)
+        elif choice in ('4', 'disable'):
+            toggle_disable_server(s, force_state=True)
+        elif choice in ('5', 'enable'):
+            toggle_disable_server(s, force_state=False)
+        elif choice in ('6', 'inspect', 'info', 'details'):
+            inspect_server_details(s)
+        else:
+            print(f"\n{RED}Invalid selection. Choose 1-6, R, or B.{RESET}")
+            time.sleep(1.0)
+
 # ---------------------------------------------------------
 # Interactive CLI Loop
 # ---------------------------------------------------------
@@ -877,7 +1075,7 @@ def interactive_loop():
         render_cli(data)
 
         try:
-            choice = input(f" {BOLD}{CORAL}Enter action:{RESET} ").strip().lower()
+            choice = input(f" {BOLD}{CORAL}Select server # (1-{len(data['servers'])}) or action:{RESET} ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting.")
             break
@@ -885,7 +1083,7 @@ def interactive_loop():
         if choice in ('q', 'exit'):
             print(f"\n{GREEN}Goodbye!{RESET}")
             break
-        elif choice == 'r':
+        elif choice in ('r', 'refresh'):
             continue
         elif choice == 'p':
             deep_port_audit(data, interactive=True)
@@ -900,59 +1098,22 @@ def interactive_loop():
                     if pid:
                         print(f"{GREEN}Started '{s['name']}' (PID {pid}){RESET}")
             time.sleep(1.2)
-        elif choice == 'd' or choice.startswith('d ') or choice.startswith('disable ') or choice.startswith('enable '):
-            parts = choice.split()
-            t_idx = -1
-            if len(parts) > 1 and parts[1].isdigit():
-                t_idx = int(parts[1])
-            elif len(parts) > 1:
-                query = parts[1].lower()
-                m = next((x for x in data['servers'] if query in x['name'].lower()), None)
-                if m:
-                    t_idx = m['num']
-            else:
-                try:
-                    val = input(f" {BOLD}{YELLOW}Enter server # or name to toggle Disable/Enable:{RESET} ").strip()
-                    if val.isdigit():
-                        t_idx = int(val)
-                    else:
-                        m = next((x for x in data['servers'] if val.lower() in x['name'].lower()), None)
-                        if m:
-                            t_idx = m['num']
-                except Exception:
-                    continue
-
-            s_target = next((x for x in data['servers'] if x['num'] == t_idx), None)
-            if s_target:
-                force = True if choice.startswith('disable ') else (False if choice.startswith('enable ') else None)
-                toggle_disable_server(s_target, force_state=force)
-            else:
-                print(f"{RED}Server not found.{RESET}")
-                time.sleep(1)
         elif choice.isdigit():
             idx = int(choice)
             matched = [s for s in data['servers'] if s['num'] == idx]
-            if not matched:
-                print(f"{RED}Invalid server number: {idx}{RESET}")
-                time.sleep(1)
-                continue
-            s = matched[0]
-            if s['type'] == 'remote':
-                print(f"\n{CYAN}'{s['name']}' is a remote cloud server managed via HTTPS.{RESET}")
-                time.sleep(1.5)
-            elif s['is_running']:
-                killed = kill_server(s)
-                print(f"\n{RED}Stopped '{s['name']}' (Killed PIDs: {killed}){RESET}")
-                print(f"{DIM}Tip: If it auto-restarts when using an IDE/agent, press [D] to Disable it.{RESET}")
-                time.sleep(1.5)
+            if matched:
+                server_control_menu(matched[0]['name'])
             else:
-                pid = start_server(s)
-                if pid:
-                    print(f"\n{GREEN}Started '{s['name']}' (New PID: {pid}){RESET}")
+                print(f"{RED}Invalid server number: {idx}. Choose 1 to {len(data['servers'])}.{RESET}")
                 time.sleep(1.2)
         else:
-            print(f"{RED}Unrecognized command. Enter 1-N, D, K, S, P, R, or Q.{RESET}")
-            time.sleep(1)
+            # Check if user typed a server name directly (e.g. "github", "excalidraw")
+            matched = [s for s in data['servers'] if choice in s['name'].lower()]
+            if matched:
+                server_control_menu(matched[0]['name'])
+            else:
+                print(f"{RED}Unrecognized input: '{choice}'. Enter server # (1-{len(data['servers'])}), name, K, S, P, R, or Q.{RESET}")
+                time.sleep(1.2)
 
 def main():
     if len(sys.argv) > 1:
@@ -966,6 +1127,23 @@ def main():
         elif cmd == 'kill-all':
             killed = kill_all_servers(data['servers'])
             print(f"Killed {len(killed)} process(es): {killed}")
+        elif cmd in ('select', 'control', 'manage') and len(sys.argv) > 2:
+            target = sys.argv[2]
+            server_control_menu(target)
+        elif cmd == 'restart' and len(sys.argv) > 2:
+            target = sys.argv[2]
+            s = next((x for x in data['servers'] if target.lower() in x['name'].lower()), None)
+            if s:
+                restart_server(s)
+            else:
+                print(f"Server '{target}' not found.")
+        elif cmd in ('inspect', 'info') and len(sys.argv) > 2:
+            target = sys.argv[2]
+            s = next((x for x in data['servers'] if target.lower() in x['name'].lower()), None)
+            if s:
+                inspect_server_details(s, interactive=False)
+            else:
+                print(f"Server '{target}' not found.")
         elif cmd == 'kill' and len(sys.argv) > 2:
             target = sys.argv[2]
             s = next((x for x in data['servers'] if target.lower() in x['name'].lower()), None)
@@ -999,8 +1177,11 @@ def main():
         else:
             print("Usage:")
             print("  mcp-manager.bat                 (Interactive Claude-style menu)")
+            print("  mcp-manager.bat select <name>   (Open granular menu for server)")
             print("  mcp-manager.bat status          (Show table once)")
             print("  mcp-manager.bat ports           (Deep scan all open ports)")
+            print("  mcp-manager.bat restart <name>  (Restart server)")
+            print("  mcp-manager.bat inspect <name>  (Inspect server details)")
             print("  mcp-manager.bat disable <name>  (Disable server in config & kill process)")
             print("  mcp-manager.bat enable <name>   (Enable server in config)")
             print("  mcp-manager.bat kill <name>     (Kill specific server)")
@@ -1011,3 +1192,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
