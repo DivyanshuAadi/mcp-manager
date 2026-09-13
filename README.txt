@@ -1,17 +1,27 @@
-MCP Servers Manager
-===================
+✦ MCP 360° ENGINE (v3.0)
+===========================
 
 Double-click to use:
-1. mcp-manager.bat  -> Interactive menu to see status, start, or kill servers.
+1. mcp-manager.bat  -> Interactive Claude-styled menu to see status, start, or kill servers.
 2. mcp-status.bat   -> Quick 1-second status table of all running MCP servers and RAM usage.
 
-Command Line Usage (from CMD or PowerShell):
-- mcp-manager.bat status       (View status table once)
-- mcp-manager.bat kill <name>  (Kill specific server)
-- mcp-manager.bat kill-all     (Kill all running MCP servers)
-- mcp-manager.bat start <name> (Start specific server)
+Key Capabilities:
+- Full-System Network Port Prober: Scans all listening TCP ports on the machine.
+- Stdio Process Inspector: Monitors CPU and Windows Commit RAM for active processes.
+- Machine Filesystem Discovery: Discovers unconfigured MCP repos on your drive (e.g. D:\Tools & MCP).
+- Universal Agent Harvester: Auto-detects servers in Claude Code, Claude Desktop, Cursor, Windsurf, Cline, etc.
 
-Auto-Detection:
-- Automatically detects servers from MCP Router (mcprouter.db).
-- Automatically detects servers from Claude configs (~/.claude.json, Claude Desktop).
-- Automatically detects any other ad-hoc running MCP server process on your system.
+Interactive Shortcuts (inside mcp-manager.bat):
+- [1-N] : Toggle Server (Start / Stop)
+- [K]   : Kill All Running MCP Servers
+- [S]   : Start All Stopped Servers
+- [P]   : Deep Port Audit (view every open port on host)
+- [R]   : Refresh
+- [Q]   : Quit
+
+CLI Usage:
+- mcp-manager.bat status
+- mcp-manager.bat ports
+- mcp-manager.bat kill <name>
+- mcp-manager.bat start <name>
+- mcp-manager.bat kill-all

@@ -2,10 +2,13 @@ import os
 import sys
 import re
 import json
+import glob
 import time
 import socket
 import sqlite3
 import subprocess
+import urllib.request
+import urllib.error
 
 # Ensure UTF-8 output and enable Windows ANSI virtual terminal
 try:
@@ -59,87 +62,243 @@ def pad_visible(s, width, align='left'):
         return (' ' * left) + s + (' ' * right)
     return s + (' ' * diff)
 
-# ---------------------------------------------------------
-# 1. Multi-Agent Config Discovery (Zero MCP Router dependency)
-# ---------------------------------------------------------
 HOME = os.path.expanduser('~')
 APPDATA = os.environ.get('APPDATA', '')
 LOCALAPPDATA = os.environ.get('LOCALAPPDATA', '')
 
-AGENT_CONFIG_TARGETS = [
-    # Claude Code & Desktop
-    ('Claude Code', os.path.join(HOME, '.claude.json')),
-    ('Claude Global', os.path.join(HOME, '.claude', 'mcp.json')),
-    ('Claude Desktop', os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')),
-    # Cursor
-    ('Cursor', os.path.join(HOME, '.cursor', 'mcp.json')),
-    ('Cursor Global', os.path.join(APPDATA, 'Cursor', 'User', 'globalStorage', 'mcp.json')),
-    # Windsurf
-    ('Windsurf', os.path.join(HOME, '.codeium', 'windsurf', 'mcp_config.json')),
-    ('Windsurf User', os.path.join(APPDATA, 'Windsurf', 'User', 'mcp.json')),
-    # Cline & Roo Code
-    ('Cline', os.path.join(APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')),
-    ('Roo Code', os.path.join(APPDATA, 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json')),
-    # Continue.dev
-    ('Continue', os.path.join(HOME, '.continue', 'config.json')),
-    # Zed
-    ('Zed', os.path.join(HOME, '.config', 'zed', 'settings.json')),
-    ('Zed AppData', os.path.join(APPDATA, 'Zed', 'settings.json')),
-    # VS Code workspace
-    ('VS Code', os.path.join(os.getcwd(), '.vscode', 'mcp.json')),
-    # Current workspace
-    ('Workspace', os.path.join(os.getcwd(), 'mcp.json')),
-    ('Workspace .mcp', os.path.join(os.getcwd(), '.mcp.json')),
-    # MCP Router (optional legacy source if present, but zero dependency)
-    ('MCP Router', os.path.join(APPDATA, 'MCP Router', 'mcprouter.db'))
-]
+# ---------------------------------------------------------
+# LAYER 1: Deep Network & Port Prober (Surface & Depth)
+# ---------------------------------------------------------
+def probe_mcp_http(ip, port, timeout=0.15):
+    """Depth-level active probe for MCP SSE/HTTP JSON-RPC protocol."""
+    target_ip = '127.0.0.1' if ip in ('0.0.0.0', '::', '') else ip
+    endpoints = [
+        ('/mcp/sse', 'GET'),
+        ('/sse', 'GET'),
+        ('/mcp', 'GET'),
+        ('/mcp', 'POST')
+    ]
+    for ep, method in endpoints:
+        url = f"http://{target_ip}:{port}{ep}"
+        try:
+            req = urllib.request.Request(
+                url,
+                data=b'{"jsonrpc":"2.0","method":"ping","id":1}' if method == 'POST' else None,
+                headers={'Accept': 'text/event-stream, application/json', 'User-Agent': 'MCP-Probe'}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct = resp.headers.get('Content-Type', '')
+                if 'event-stream' in ct or 'json' in ct:
+                    return True, f"MCP {ep} ({resp.status})"
+        except urllib.error.HTTPError as e:
+            try:
+                ct = e.headers.get('Content-Type', '')
+                body = e.read(150).decode('utf-8', errors='ignore')
+                if any(k in body.lower() for k in ['token', 'mcp', 'session', 'unauthorized', 'jsonrpc']):
+                    return True, f"MCP HTTP ({e.code})"
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return False, ""
 
-def load_agent_configs():
+def scan_all_ports(proc_map):
+    """Scans every open listening TCP port on the system and identifies MCP sockets."""
+    mcp_ports = []
+    all_sockets = []
+
+    try:
+        conns = psutil.net_connections(kind='tcp')
+    except Exception:
+        conns = []
+
+    for c in conns:
+        if c.status == 'LISTEN' and c.laddr:
+            ip, port = c.laddr.ip, c.laddr.port
+            pid = c.pid
+            p_info = proc_map.get(pid, {})
+            pname = p_info.get('name', 'unknown')
+            cmd = p_info.get('cmdline', '')
+            ram = p_info.get('ram_commit_mb', 0.0)
+
+            # Surface check: command line / name clues
+            cmd_lower = cmd.lower()
+            surface_mcp = any(k in cmd_lower for k in ['mcp', 'fastmcp', 'modelcontextprotocol'])
+            
+            # Depth check: probe endpoint
+            depth_mcp, clue = probe_mcp_http(ip, port)
+
+            is_mcp = surface_mcp or depth_mcp
+
+            # Guess server title
+            guess = None
+            if is_mcp:
+                for tok in cmd.split():
+                    c_tok = os.path.basename(tok).lower().replace('.exe','').replace('.py','').replace('.js','')
+                    if 'mcp' in c_tok and c_tok not in ('mcp-manager', 'mcp-status'):
+                        guess = c_tok
+                        break
+                if not guess:
+                    guess = f"{pname}:{port}"
+
+                mcp_ports.append({
+                    'port': port,
+                    'ip': ip,
+                    'pid': pid,
+                    'name': guess,
+                    'pname': pname,
+                    'cmd': cmd,
+                    'ram_commit_mb': ram,
+                    'clue': clue or ('Process Match' if surface_mcp else '')
+                })
+
+            all_sockets.append({
+                'port': port,
+                'ip': ip,
+                'pid': pid,
+                'pname': pname,
+                'cmd': cmd,
+                'is_mcp': is_mcp,
+                'clue': clue
+            })
+
+    return mcp_ports, all_sockets
+
+# ---------------------------------------------------------
+# LAYER 2: Filesystem & Local Machine Repository Scanner
+# (Solves: "Installed but not configured in any coding agent")
+# ---------------------------------------------------------
+def scan_installed_machine_servers():
+    """Discovers all MCP servers installed locally on the filesystem."""
+    installed = {}
+
+    # 1. Local Tool Directories (e.g. D:\Tools & MCP, C:\Users\<user>\mcp, etc.)
+    search_dirs = [
+        r'D:\Tools & MCP\Local',
+        r'D:\Tools & MCP',
+        os.path.join(HOME, 'mcp'),
+        os.path.join(HOME, 'Tools'),
+        os.path.join(HOME, 'Desktop', 'MCP*')
+    ]
+
+    for dpattern in search_dirs:
+        for base in glob.glob(dpattern):
+            if not os.path.isdir(base):
+                continue
+            for item in os.listdir(base):
+                full = os.path.join(base, item)
+                if not os.path.isdir(full):
+                    continue
+
+                item_lower = item.lower()
+                # Check directory contents for markers
+                try:
+                    entries = [e.lower() for e in os.listdir(full)]
+                except Exception:
+                    continue
+
+                is_mcp = (
+                    'mcp' in item_lower or
+                    'pyproject.toml' in entries or
+                    'package.json' in entries or
+                    'requirements.txt' in entries
+                )
+
+                if is_mcp:
+                    # Detect launcher command
+                    run_cmd = None
+                    run_args = []
+
+                    # Check for virtualenv Python
+                    venv_python = os.path.join(full, '.venv', 'Scripts', 'python.exe')
+                    if os.path.exists(venv_python):
+                        # Find python script
+                        scripts = [s for s in entries if s.endswith('.py') and not s.startswith('test_')]
+                        if scripts:
+                            run_cmd = venv_python
+                            run_args = [os.path.join(full, scripts[0])]
+                    elif 'package.json' in entries:
+                        # Node project
+                        cli_js = os.path.join(full, 'dist', 'index.js')
+                        if not os.path.exists(cli_js):
+                            cli_js = os.path.join(full, 'src', 'cli.js')
+                        if not os.path.exists(cli_js):
+                            cli_js = os.path.join(full, 'index.js')
+                        if os.path.exists(cli_js):
+                            run_cmd = 'node'
+                            run_args = [cli_js]
+
+                    installed[item] = {
+                        'name': item,
+                        'source': 'Local Disk',
+                        'type': 'local',
+                        'path': full,
+                        'command': run_cmd,
+                        'args': json.dumps(run_args),
+                        'env': '{}',
+                        'description': f"Installed at {full}"
+                    }
+
+    # 2. NPX Cache & Global NPM Packages
+    npx_cache = os.path.join(LOCALAPPDATA, 'npm-cache', '_npx')
+    if os.path.exists(npx_cache):
+        for pkg_dir in glob.glob(os.path.join(npx_cache, '*', 'node_modules', '*')):
+            bname = os.path.basename(pkg_dir)
+            if 'mcp' in bname.lower() or bname.startswith('@modelcontextprotocol'):
+                if bname not in installed:
+                    installed[bname] = {
+                        'name': bname,
+                        'source': 'NPX Cache',
+                        'type': 'local',
+                        'path': pkg_dir,
+                        'command': 'npx',
+                        'args': json.dumps(['-y', bname]),
+                        'env': '{}',
+                        'description': f"Global NPX package ({bname})"
+                    }
+
+    return installed
+
+# ---------------------------------------------------------
+# LAYER 3: Dynamic Multi-Agent Config Harvester
+# ---------------------------------------------------------
+def scan_agent_configs():
+    """Dynamically reads MCP configs across all installed coding agents."""
+    targets = [
+        ('Claude Code', os.path.join(HOME, '.claude.json')),
+        ('Claude Global', os.path.join(HOME, '.claude', 'mcp.json')),
+        ('Claude Desktop', os.path.join(APPDATA, 'Claude', 'claude_desktop_config.json')),
+        ('Cursor', os.path.join(HOME, '.cursor', 'mcp.json')),
+        ('Cursor Global', os.path.join(APPDATA, 'Cursor', 'User', 'globalStorage', 'mcp.json')),
+        ('Windsurf', os.path.join(HOME, '.codeium', 'windsurf', 'mcp_config.json')),
+        ('Windsurf User', os.path.join(APPDATA, 'Windsurf', 'User', 'mcp.json')),
+        ('Cline', os.path.join(APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')),
+        ('Roo Code', os.path.join(APPDATA, 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json')),
+        ('Continue', os.path.join(HOME, '.continue', 'config.json')),
+        ('Zed', os.path.join(HOME, '.config', 'zed', 'settings.json')),
+        ('VS Code', os.path.join(os.getcwd(), '.vscode', 'mcp.json')),
+        ('Workspace', os.path.join(os.getcwd(), 'mcp.json'))
+    ]
+
     discovered = {}
-    active_sources = set()
+    found_agents = set()
 
-    for agent_name, path in AGENT_CONFIG_TARGETS:
+    for agent_name, path in targets:
         if not os.path.exists(path):
             continue
 
-        active_sources.add(agent_name)
-
-        # 1. Handle SQLite DB (MCP Router if present)
-        if path.endswith('.db'):
-            try:
-                conn = sqlite3.connect(path, timeout=1.0)
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute('SELECT id, name, server_type, command, args, env, description FROM servers').fetchall()
-                for r in rows:
-                    if r['name'] not in discovered:
-                        discovered[r['name']] = {
-                            'name': r['name'],
-                            'source': agent_name,
-                            'type': r['server_type'] or 'local',
-                            'command': r['command'],
-                            'args': r['args'],
-                            'env': r['env'],
-                            'description': r['description'] or ''
-                        }
-                conn.close()
-            except Exception:
-                pass
-            continue
-
-        # 2. Handle JSON config files
+        found_agents.add(agent_name)
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-
             servers = data.get('mcpServers') or data.get('mcp_servers') or data.get('mcp')
             if isinstance(servers, dict):
                 for sname, sdata in servers.items():
+                    if not isinstance(sdata, dict):
+                        continue
                     if sname in discovered:
                         if agent_name not in discovered[sname]['source']:
                             discovered[sname]['source'] += f", {agent_name}"
-                        continue
-
-                    if not isinstance(sdata, dict):
                         continue
 
                     cmd = sdata.get('command')
@@ -160,59 +319,14 @@ def load_agent_configs():
         except Exception:
             pass
 
-    return discovered, sorted(list(active_sources))
+    return discovered, sorted(list(found_agents))
 
 # ---------------------------------------------------------
-# 2. System Port Scanner for MCP Listeners
-# ---------------------------------------------------------
-def scan_mcp_ports(processes):
-    proc_map = {p['pid']: p for p in processes}
-    mcp_ports = []
-
-    try:
-        conns = psutil.net_connections(kind='tcp')
-    except (psutil.AccessDenied, Exception):
-        conns = []
-
-    for c in conns:
-        if c.status == 'LISTEN' and c.laddr:
-            ip, port = c.laddr.ip, c.laddr.port
-            pid = c.pid
-            p_info = proc_map.get(pid, {})
-            p_name = p_info.get('name', 'unknown')
-            p_cmd = p_info.get('cmdline', '')
-            p_ram = p_info.get('ram_commit_mb', 0.0)
-
-            cmd_lower = p_cmd.lower()
-            is_mcp = any(k in cmd_lower for k in ['mcp', 'fastmcp', 'sse', 'modelcontextprotocol'])
-
-            if is_mcp:
-                server_title = None
-                for tok in p_cmd.split():
-                    tok_clean = os.path.basename(tok).lower().replace('.exe','').replace('.py','').replace('.js','')
-                    if 'mcp' in tok_clean and tok_clean not in ('mcp-manager', 'mcp-status'):
-                        server_title = tok_clean
-                        break
-                if not server_title:
-                    server_title = f"{p_name}:{port}"
-
-                mcp_ports.append({
-                    'port': port,
-                    'ip': ip,
-                    'pid': pid,
-                    'name': server_title,
-                    'proc_name': p_name,
-                    'cmdline': p_cmd,
-                    'ram_commit_mb': p_ram
-                })
-
-    return mcp_ports
-
-# ---------------------------------------------------------
-# 3. Dynamic Process Pattern Matching
+# Dynamic Pattern Derivation
 # ---------------------------------------------------------
 def derive_patterns(name, command, args_str):
-    patterns = {name.lower()}
+    patterns = {name.lower().replace('-mcp', '').replace('_mcp', '')}
+    patterns.add(name.lower())
     if args_str:
         try:
             args = json.loads(args_str) if isinstance(args_str, str) else args_str
@@ -239,12 +353,58 @@ def derive_patterns(name, command, args_str):
     return list(patterns)
 
 # ---------------------------------------------------------
-# 4. System Snapshot Aggregation
+# Full 360° Snapshot Engine
 # ---------------------------------------------------------
 def get_snapshot():
-    servers_dict, active_sources = load_agent_configs()
+    # 1. Scan installed local repos on machine
+    installed_servers = scan_installed_machine_servers()
 
+    # 2. Scan coding agent configs
+    agent_servers, found_agents = scan_agent_configs()
+
+    # Merge: deduplicate intelligently using canonical server keys
+    def canon_key(name):
+        return name.lower().replace('_', '-').replace('-mcp', '').replace('_mcp', '').strip()
+
+    master_catalog = {}
+    canon_map = {}
+
+    for name, s in installed_servers.items():
+        ck = canon_key(name)
+        canon_map[ck] = name
+        master_catalog[name] = s
+
+    for name, s in agent_servers.items():
+        ck = canon_key(name)
+        if ck in canon_map:
+            existing_name = canon_map[ck]
+            existing = master_catalog[existing_name]
+            # Merge sources
+            sources = []
+            if 'Local Disk' in existing.get('source', ''):
+                sources.append('Local Disk')
+            if 'NPX Cache' in existing.get('source', ''):
+                sources.append('NPX Cache')
+            for a in s.get('source', '').split(','):
+                a_clean = a.strip()
+                if a_clean and a_clean not in sources:
+                    sources.append(a_clean)
+            s['source'] = ', '.join(sources)
+            if not s.get('path') and existing.get('path'):
+                s['path'] = existing['path']
+            if not s.get('command') and existing.get('command'):
+                s['command'] = existing['command']
+                s['args'] = existing['args']
+            del master_catalog[existing_name]
+            master_catalog[name] = s
+            canon_map[ck] = name
+        else:
+            canon_map[ck] = name
+            master_catalog[name] = s
+
+    # 3. Scan all system processes
     processes = []
+    proc_map = {}
     for p in psutil.process_iter(['pid', 'ppid', 'name', 'cmdline', 'cpu_percent', 'memory_info']):
         try:
             cmdline = " ".join(p.info['cmdline'] or [])
@@ -254,7 +414,7 @@ def get_snapshot():
                 continue
             private_mb = getattr(mi, 'private', mi.rss) / (1024 * 1024)
             cpu = p.cpu_percent(interval=None)
-            processes.append({
+            item = {
                 'pid': p.info['pid'],
                 'ppid': p.info['ppid'],
                 'name': name,
@@ -262,20 +422,24 @@ def get_snapshot():
                 'cpu': cpu,
                 'ram_commit_mb': round(private_mb, 1),
                 'proc': p
-            })
+            }
+            processes.append(item)
+            proc_map[p.info['pid']] = item
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
-    mcp_ports = scan_mcp_ports(processes)
+    # 4. Deep port & socket scan
+    mcp_ports, all_sockets = scan_all_ports(proc_map)
 
+    # 5. Process matching
     assigned_pids = set()
     servers_list = []
     total_commit = 0.0
 
     idx = 1
-    for s_name, s_data in servers_dict.items():
+    for s_name, s_data in master_catalog.items():
         s_type = s_data['type']
-        patterns = derive_patterns(s_name, s_data['command'], s_data['args'])
+        patterns = derive_patterns(s_name, s_data.get('command'), s_data.get('args'))
 
         matched = []
         if s_type != 'remote':
@@ -289,7 +453,7 @@ def get_snapshot():
                         assigned_pids.add(p['pid'])
 
         is_running = len(matched) > 0
-        status = "ONLINE" if s_type == 'remote' else ("RUNNING" if is_running else "STOPPED")
+        status = "ONLINE" if s_type == 'remote' else ("RUNNING" if is_running else "INSTALLED")
 
         commit_mb = sum(p['ram_commit_mb'] for p in matched)
         cpu = sum(p['cpu'] for p in matched)
@@ -297,6 +461,7 @@ def get_snapshot():
 
         total_commit += commit_mb
 
+        # Check port
         ports_str = ""
         for mp in mcp_ports:
             if mp['pid'] in pids:
@@ -306,7 +471,7 @@ def get_snapshot():
         servers_list.append({
             'num': idx,
             'name': s_name,
-            'source': s_data['source'],
+            'source': s_data.get('source', 'Local Machine'),
             'type': s_type,
             'status': status,
             'is_running': is_running,
@@ -314,14 +479,14 @@ def get_snapshot():
             'port': ports_str,
             'commit_mb': round(commit_mb, 1),
             'cpu': round(cpu, 1),
-            'command': s_data['command'],
-            'args': s_data['args'],
-            'env': s_data['env'],
+            'command': s_data.get('command'),
+            'args': s_data.get('args'),
+            'env': s_data.get('env'),
             'patterns': patterns
         })
         idx += 1
 
-    # Auto-discover other running MCP processes
+    # 6. Check unassigned MCP processes (e.g. ad-hoc started processes)
     other_mcp = []
     for p in processes:
         if p['pid'] in assigned_pids:
@@ -348,6 +513,7 @@ def get_snapshot():
             })
             total_commit += p['ram_commit_mb']
 
+    # Group unassigned processes
     grouped = {}
     for omp in other_mcp:
         gn = omp['guess_name']
@@ -388,8 +554,11 @@ def get_snapshot():
 
     return {
         'timestamp': time.strftime("%H:%M:%S"),
-        'active_sources': active_sources,
+        'found_agents': found_agents,
+        'installed_count': len(installed_servers),
         'mcp_ports': mcp_ports,
+        'all_sockets_count': len(all_sockets),
+        'all_sockets': all_sockets,
         'total_servers_ram': round(total_commit, 1),
         'system_ram_used_pct': sys_mem.percent,
         'system_ram_free_gb': round(sys_mem.available / (1024**3), 1),
@@ -398,27 +567,27 @@ def get_snapshot():
     }
 
 # ---------------------------------------------------------
-# 5. Claude Code Elegant CLI Rendering (Pixel-Perfect)
+# Claude Code CLI Presentation (High-End Aesthetic)
 # ---------------------------------------------------------
 def render_cli(data):
     os.system('cls' if os.name == 'nt' else 'clear')
 
-    W = 92  # Width
+    W = 94
 
     # Header Box
     print(f"\n{CORAL}╭{'─' * (W - 2)}╮{RESET}")
-    title_line = f"  {BOLD}{WHITE}✦ MCP SERVERS MANAGER{RESET}  {DIM}v2.5{RESET}"
-    status_line = f"{GREEN}● SYSTEM ACTIVE{RESET}  "
+    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.0 (Surface & Depth Scanner){RESET}"
+    status_line = f"{GREEN}● ALL PORTS & PROCS ACTIVE{RESET}  "
     space_len = W - 2 - len_visible(title_line) - len_visible(status_line)
     print(f"{CORAL}│{RESET}{title_line}{' ' * max(0, space_len)}{status_line}{CORAL}│{RESET}")
 
-    sub_line = f"  {DIM}Universal Controller & Live Resource Monitor across all Coding Agents & Ports{RESET}"
+    sub_line = f"  {DIM}Full-System Network Port Prober & Universal Agent Harvester{RESET}"
     space_sub = W - 2 - len_visible(sub_line)
     print(f"{CORAL}│{RESET}{sub_line}{' ' * max(0, space_sub)}{CORAL}│{RESET}")
     print(f"{CORAL}╰{'─' * (W - 2)}╯{RESET}")
 
     # System Status Ribbon
-    active_count = sum(1 for s in data['servers'] if s['is_running'] or s['status'] == 'ONLINE')
+    running_count = sum(1 for s in data['servers'] if s['is_running'])
     total_count = len(data['servers'])
 
     ram_pct = data['system_ram_used_pct']
@@ -426,15 +595,16 @@ def render_cli(data):
     filled = int((ram_pct / 100.0) * bar_len)
     bar_str = f"[{'█' * filled}{'░' * (bar_len - filled)}]"
 
-    print(f" {BOLD}Agents Found{RESET} : {CYAN}{', '.join(data['active_sources']) or 'Standalone'}{RESET}")
-    print(f" {BOLD}System RAM  {RESET} : {AMBER}{bar_str} {ram_pct}%{RESET} ({data['system_ram_free_gb']} GB free of {data['system_ram_total_gb']} GB)")
-    print(f" {BOLD}Total MCP   {RESET} : {BOLD}{GREEN}{data['total_servers_ram']} MB{RESET} Commit Charge  │  {BOLD}{active_count}/{total_count}{RESET} Servers Active")
+    agents_str = ', '.join(data['found_agents']) if data['found_agents'] else 'Zero Config Mode'
+    print(f" {BOLD}Agents / Repos{RESET} : {CYAN}{agents_str}{RESET} │ {DIM}{data['installed_count']} Local Repos on Drive{RESET}")
+    print(f" {BOLD}System RAM    {RESET} : {AMBER}{bar_str} {ram_pct}%{RESET} ({data['system_ram_free_gb']} GB free of {data['system_ram_total_gb']} GB)")
+    print(f" {BOLD}Total Memory  {RESET} : {BOLD}{GREEN}{data['total_servers_ram']} MB{RESET} Commit Charge  │  {BOLD}{running_count}{RESET} Active / {total_count} Total Servers")
 
     if data['mcp_ports']:
         port_items = [f"{CYAN}:{p['port']}{RESET} ({p['name']} / PID {p['pid']})" for p in data['mcp_ports']]
-        print(f" {BOLD}Open Ports  {RESET} : {' │ '.join(port_items)}")
+        print(f" {BOLD}Active Ports  {RESET} : {' │ '.join(port_items)} ({data['all_sockets_count']} total system sockets)")
     else:
-        print(f" {BOLD}Open Ports  {RESET} : {DIM}No dedicated MCP HTTP/SSE listener ports open{RESET}")
+        print(f" {BOLD}Active Ports  {RESET} : {DIM}No dedicated MCP HTTP/SSE listener ports open ({data['all_sockets_count']} sockets scanned){RESET}")
 
     print(f"{GRAY}{'─' * W}{RESET}")
 
@@ -442,10 +612,10 @@ def render_cli(data):
     header = (
         f" {pad_visible('#', 3)} "
         f"{pad_visible('Server Name', 24)} "
-        f"{pad_visible('Status', 12)} "
-        f"{pad_visible('Source', 16)} "
-        f"{pad_visible('Port / PID', 14)} "
-        f"{pad_visible('RAM Commit', 12, 'right')} "
+        f"{pad_visible('Status', 11)} "
+        f"{pad_visible('Discovery Source', 20)} "
+        f"{pad_visible('Port / PID', 13)} "
+        f"{pad_visible('RAM Commit', 11, 'right')} "
         f"{pad_visible('CPU', 6, 'right')}"
     )
     print(f"{BOLD}{WHITE}{header}{RESET}")
@@ -458,14 +628,14 @@ def render_cli(data):
 
         if s['status'] == 'RUNNING':
             status_badge = f"{GREEN}● RUNNING{RESET}"
-        elif s['status'] == 'STOPPED':
-            status_badge = f"{DIM}○ STOPPED{RESET}"
+        elif s['status'] == 'INSTALLED':
+            status_badge = f"{DIM}○ READY  {RESET}"
         elif s['status'] == 'ONLINE':
-            status_badge = f"{CYAN}✦ REMOTE{RESET}"
+            status_badge = f"{CYAN}✦ REMOTE {RESET}"
         else:
-            status_badge = f"{RED}✗ ERROR{RESET}"
+            status_badge = f"{DIM}○ STOPPED{RESET}"
 
-        source_str = f"{DIM}{s['source'][:15]}{RESET}"
+        source_str = f"{DIM}{s['source'][:20]}{RESET}"
 
         if s['port']:
             loc_str = f"{CYAN}{s['port']}{RESET} {DIM}P:{s['pids'][0] if s['pids'] else ''}{RESET}"
@@ -497,26 +667,26 @@ def render_cli(data):
         row_str = (
             f" {pad_visible(num_str, 3)} "
             f"{pad_visible(s_name, 24)} "
-            f"{pad_visible(status_badge, 12)} "
-            f"{pad_visible(source_str, 16)} "
-            f"{pad_visible(loc_str, 14)} "
-            f"{pad_visible(ram_display, 12, 'right')} "
+            f"{pad_visible(status_badge, 11)} "
+            f"{pad_visible(source_str, 20)} "
+            f"{pad_visible(loc_str, 13)} "
+            f"{pad_visible(ram_display, 11, 'right')} "
             f"{pad_visible(cpu_str, 6, 'right')}"
         )
         print(row_str)
 
     print(f"{GRAY}{'─' * W}{RESET}")
-    print(f"{DIM}Note: Servers marked with *name* were automatically detected from running processes.{RESET}\n")
+    print(f"{DIM}Tip: Ready servers were auto-discovered from your local tools drive (even if not configured in any agent).{RESET}\n")
 
     # Action Bar
     print(f"{DARK_GRAY}╭─ {BOLD}{WHITE}Actions & Shortcuts{RESET}{DARK_GRAY} {'─' * (W - 25)}╮{RESET}")
-    bar = f"  {CORAL}[1-N]{RESET} Toggle Server    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start All    {CYAN}[P]{RESET} Scan All Ports    {AMBER}[R]{RESET} Refresh    {WHITE}[Q]{RESET} Quit  "
+    bar = f"  {CORAL}[1-N]{RESET} Toggle Server    {RED}[K]{RESET} Kill All    {GREEN}[S]{RESET} Start All    {CYAN}[P]{RESET} Deep Port Audit    {AMBER}[R]{RESET} Refresh    {WHITE}[Q]{RESET} Quit  "
     space_bar = W - 2 - len_visible(bar)
     print(f"{DARK_GRAY}│{RESET}{bar}{' ' * max(0, space_bar)}{DARK_GRAY}│{RESET}")
     print(f"{DARK_GRAY}╰{'─' * (W - 2)}╯{RESET}")
 
 # ---------------------------------------------------------
-# 6. Process Control Functions
+# Control Operations
 # ---------------------------------------------------------
 def kill_server(server_obj):
     killed = []
@@ -525,7 +695,7 @@ def kill_server(server_obj):
             p = psutil.Process(pid)
             p.kill()
             killed.append(pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except Exception:
             pass
 
     patterns = server_obj.get('patterns', [server_obj['name'].lower()])
@@ -537,7 +707,7 @@ def kill_server(server_obj):
                     p.kill()
                     if p.info['pid'] not in killed:
                         killed.append(p.info['pid'])
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except Exception:
             pass
 
     return killed
@@ -547,7 +717,7 @@ def start_server(s):
         print(f"{AMBER}Cannot spawn remote cloud server '{s['name']}' locally.{RESET}")
         return None
     if not s['command']:
-        print(f"{RED}No executable command configured for '{s['name']}'.{RESET}")
+        print(f"{RED}No executable command found for '{s['name']}'. Check pyproject.toml or package.json.{RESET}")
         return None
 
     cmd = s['command']
@@ -578,47 +748,40 @@ def kill_all_servers(servers):
             total_killed.extend(k)
     return total_killed
 
-def deep_port_scan(interactive=True):
+def deep_port_audit(data, interactive=True):
     os.system('cls' if os.name == 'nt' else 'clear')
-    print(f"\n{CYAN}=== Scanning All Open System Ports for MCP Listeners ==={RESET}\n")
-    try:
-        conns = psutil.net_connections(kind='tcp')
-    except Exception as e:
-        print(f"{RED}Error querying network connections: {e}{RESET}")
-        if interactive:
-            input("\nPress Enter to return...")
-        return
+    print(f"\n{CYAN}╭────────────────────────────────────────────────────────────────────────────────────────╮{RESET}")
+    print(f"{CYAN}│  ⚡ DEEP SYSTEM PORT & SOCKET AUDIT (Every Listening Port Probed)                     │{RESET}")
+    print(f"{CYAN}╰────────────────────────────────────────────────────────────────────────────────────────╯{RESET}\n")
 
-    listening = [c for c in conns if c.status == 'LISTEN']
-    print(f"Found {len(listening)} listening TCP sockets on host:\n")
-    print(f" {'Port':<8} {'IP':<16} {'PID':<8} {'Process Name':<20} {'Command / Clues'}")
-    print(f" {'─'*75}")
+    sockets = data.get('all_sockets', [])
+    print(f" Audited {len(sockets)} open TCP sockets on host:\n")
+    print(f" {'Port':<8} {'IP Address':<16} {'PID':<8} {'Process Name':<20} {'Status / MCP Protocol Clues'}")
+    print(f" {'─'*78}")
 
-    for c in sorted(listening, key=lambda x: x.laddr.port if x.laddr else 0):
-        if not c.laddr:
-            continue
-        port = c.laddr.port
-        ip = c.laddr.ip
-        pid = c.pid or '-'
-        pname = '-'
-        cmd = '-'
-        if c.pid:
-            try:
-                p = psutil.Process(c.pid)
-                pname = p.name()
-                cmd = " ".join(p.cmdline())[:45]
-            except Exception:
-                pass
+    for s in sorted(sockets, key=lambda x: x['port']):
+        port = s['port']
+        ip = s['ip']
+        pid = s['pid'] or '-'
+        pname = s['pname']
+        is_mcp = s['is_mcp']
+        clue = s['clue'] or ('MCP Process' if is_mcp else 'Standard Socket')
 
-        highlight = CYAN if any(k in cmd.lower() for k in ['mcp', 'fastmcp', 'router']) else DIM
-        print(f" {highlight}:{port:<7} {ip:<16} {str(pid):<8} {pname:<20} {cmd}{RESET}")
+        if is_mcp:
+            line_color = GREEN
+            badge = f"{GREEN}● ACTIVE MCP{RESET}"
+        else:
+            line_color = DIM
+            badge = f"{DIM}○ listening {RESET}"
 
-    print(f"\n{DIM}Scan complete.{RESET}")
+        print(f" {line_color}:{port:<7} {ip:<16} {str(pid):<8} {pname:<20}{RESET} {badge} {DIM}{clue}{RESET}")
+
+    print(f"\n{DIM}Port audit complete.{RESET}")
     if interactive:
         input("\nPress Enter to return to main menu...")
 
 # ---------------------------------------------------------
-# 7. Interactive Loop & Entry Points
+# Interactive CLI Loop
 # ---------------------------------------------------------
 def interactive_loop():
     while True:
@@ -637,7 +800,7 @@ def interactive_loop():
         elif choice == 'r':
             continue
         elif choice == 'p':
-            deep_port_scan()
+            deep_port_audit(data, interactive=True)
         elif choice == 'k':
             killed = kill_all_servers(data['servers'])
             print(f"\n{RED}Killed {len(killed)} process(es): {killed}{RESET}")
@@ -681,7 +844,7 @@ def main():
         if cmd == 'status':
             render_cli(data)
         elif cmd == 'ports':
-            deep_port_scan(interactive=False)
+            deep_port_audit(data, interactive=False)
         elif cmd == 'kill-all':
             killed = kill_all_servers(data['servers'])
             print(f"Killed {len(killed)} process(es): {killed}")
@@ -705,7 +868,7 @@ def main():
             print("Usage:")
             print("  mcp-manager.bat              (Interactive Claude-style menu)")
             print("  mcp-manager.bat status       (Show table once)")
-            print("  mcp-manager.bat ports        (Scan all open ports)")
+            print("  mcp-manager.bat ports        (Deep scan all open ports)")
             print("  mcp-manager.bat kill <name>  (Kill specific server)")
             print("  mcp-manager.bat kill-all     (Kill all servers)")
             print("  mcp-manager.bat start <name> (Start specific server)")
