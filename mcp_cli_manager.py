@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-  ✦ MCP 360° ENGINE v3.5 - CROSS-PLATFORM UNIVERSAL MCP CONTROL & MONITOR
+  ✦ MCP 360° ENGINE v3.6 - CROSS-PLATFORM UNIVERSAL MCP CONTROL & MONITOR
 =============================================================================
   Changes from v3.4:
   • Real remote-server health checks (HTTP + MCP-style probe)
@@ -27,8 +27,9 @@ import subprocess
 import platform
 import tempfile
 import webbrowser
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -43,7 +44,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
-IS_LINUX = sys.platform.startswith("linux")
 PLATFORM = platform.system().lower()
 
 if IS_WIN:
@@ -83,10 +83,28 @@ def pad_visible(s: str, width: int, align: str = "left") -> str:
     return s + (" " * pad)
 
 
-def canon_key(name: Any) -> str:
+def normalize_server_key(name: Any) -> str:
+    """
+    Unified canonical key for MCP servers.
+    Strips npm scope, prefixes, suffixes, and non-alphanumeric characters.
+    """
     if not name:
         return ""
-    return str(name).lower().replace("_", "-").replace("-mcp", "").replace("_mcp", "").strip()
+    clean = str(name).lower().strip()
+    for prefix in ("@modelcontextprotocol/server-", "@modelcontextprotocol/", "server-", "mcp-", "mcpserver-"):
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):]
+    for suffix in ("-mcp", "_mcp", "-server", "_server"):
+        if clean.endswith(suffix):
+            clean = clean[:-len(suffix)]
+    clean_alpha = re.sub(r"[^a-z0-9]", "", clean)
+    for prefix in ("mcpserver", "server", "mcp"):
+        if clean_alpha.startswith(prefix) and len(clean_alpha) > len(prefix):
+            clean_alpha = clean_alpha[len(prefix):]
+    return clean_alpha
+
+canon_key = normalize_server_key
+normalize_mcp_key = normalize_server_key
 
 
 HOME = os.path.expanduser("~")
@@ -636,6 +654,78 @@ def derive_patterns(name: str, command: Optional[str], args_str: Any) -> List[st
 # ---------------------------------------------------------------------------
 # Snapshot engine
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Remote Server Health Cache (Persistent Disk + Async / Threaded, 60s TTL)
+# ---------------------------------------------------------------------------
+_HEALTH_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mcp_health_cache.json")
+_REMOTE_HEALTH_CACHE: Dict[str, Tuple[float, str, str]] = {}
+_REMOTE_CACHE_LOCK = threading.Lock()
+
+def _load_disk_health_cache() -> None:
+    global _REMOTE_HEALTH_CACHE
+    if os.path.exists(_HEALTH_CACHE_FILE):
+        try:
+            with open(_HEALTH_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) == 3:
+                        _REMOTE_HEALTH_CACHE[k] = (float(v[0]), str(v[1]), str(v[2]))
+        except Exception:
+            pass
+
+def _save_disk_health_cache() -> None:
+    try:
+        data = {k: list(v) for k, v in _REMOTE_HEALTH_CACHE.items()}
+        with open(_HEALTH_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+_load_disk_health_cache()
+
+def batch_check_remote_health(urls: List[str], timeout: float = 0.8) -> Dict[str, Tuple[str, str]]:
+    """Check all remote server endpoints concurrently in worker threads with persistent cache."""
+    results: Dict[str, Tuple[str, str]] = {}
+    now = time.time()
+    to_fetch: List[str] = []
+
+    with _REMOTE_CACHE_LOCK:
+        for u in urls:
+            if u in _REMOTE_HEALTH_CACHE:
+                ts, st, dt = _REMOTE_HEALTH_CACHE[u]
+                if now - ts < 60.0:
+                    results[u] = (st, dt)
+                    continue
+            to_fetch.append(u)
+
+    if not to_fetch:
+        return results
+
+    def _worker(u: str) -> Tuple[str, str, str]:
+        st, dt = check_remote_health(u, timeout=timeout)
+        return u, st, dt
+
+    with ThreadPoolExecutor(max_workers=min(4, len(to_fetch))) as executor:
+        futures = [executor.submit(_worker, u) for u in to_fetch]
+        for f in as_completed(futures):
+            try:
+                u, st, dt = f.result()
+                results[u] = (st, dt)
+                with _REMOTE_CACHE_LOCK:
+                    _REMOTE_HEALTH_CACHE[u] = (time.time(), st, dt)
+            except Exception:
+                pass
+
+    with _REMOTE_CACHE_LOCK:
+        for u in to_fetch:
+            if u not in results:
+                results[u] = ("UNKNOWN", "timeout")
+        _save_disk_health_cache()
+
+    return results
+
 def get_snapshot(show_local_repos: Optional[bool] = None, check_remotes: bool = True) -> Dict[str, Any]:
     if show_local_repos is None:
         prefs = load_prefs()
@@ -684,6 +774,13 @@ def get_snapshot(show_local_repos: Optional[bool] = None, check_remotes: bool = 
     total_commit = 0.0
     idx = 1
 
+    # Concurrent pre-fetch of remote server health (sub-second guarantee)
+    remote_health_results: Dict[str, Tuple[str, str]] = {}
+    if check_remotes:
+        remote_urls = [s.get("url") for s in master_catalog.values() if s.get("type") == "remote" and s.get("url")]
+        if remote_urls:
+            remote_health_results = batch_check_remote_health(remote_urls, timeout=0.8)
+
     for s_name, s_data in master_catalog.items():
         s_type = s_data["type"]
         patterns = derive_patterns(s_name, s_data.get("command"), s_data.get("args"))
@@ -715,13 +812,13 @@ def get_snapshot(show_local_repos: Optional[bool] = None, check_remotes: bool = 
         is_running = len(pids) > 0
         is_disabled = bool(s_data.get("disabled", False))
 
-        # Remote health check
+        # Remote health check (Resolved via concurrent cache)
         remote_status = None
         remote_detail = ""
         if s_type == "remote" and check_remotes:
             url = s_data.get("url")
             if url:
-                remote_status, remote_detail = check_remote_health(url)
+                remote_status, remote_detail = remote_health_results.get(url, ("UNKNOWN", "checking..."))
             else:
                 remote_status, remote_detail = "UNKNOWN", "no url stored"
 
@@ -874,7 +971,7 @@ def render_cli(data: Dict[str, Any]) -> None:
     W = max(112, 3 + 1 + 24 + 1 + 13 + 1 + col_src_w + 1 + 14 + 1 + 11 + 1 + 6 + 2)
 
     print(f"\n{CORAL}╭{'─' * (W - 2)}╮{RESET}")
-    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.5 (Cross-Platform + Remote Health){RESET}"
+    title_line = f"  {BOLD}{WHITE}✦ MCP 360° ENGINE{RESET}  {DIM}v3.6 (Clean Architecture & Async Remote Health){RESET}"
     status_line = f"{GREEN}● FAST ENGINE ACTIVE{RESET}  "
     space_len = W - 2 - len_visible(title_line) - len_visible(status_line)
     print(f"{CORAL}│{RESET}{title_line}{' ' * max(0, space_len)}{status_line}{CORAL}│{RESET}")
@@ -1656,64 +1753,33 @@ def main() -> None:
             print(f"Killed {len(killed)} process(es): {killed}")
         elif cmd in ("select", "control", "manage") and len(sys.argv) > 2:
             server_control_menu(sys.argv[2])
-        elif cmd in ("open", "folder") and len(sys.argv) > 2:
+        elif cmd in ("open", "folder", "uninstall", "remove", "delete", "restart", "inspect", "info", "kill", "start", "disable", "enable") and len(sys.argv) > 2:
             target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            target_key = normalize_server_key(target)
+            s = next((x for x in data["servers"] if normalize_server_key(x["name"]) == target_key), None)
+            if not s:
+                s = next((x for x in data["servers"] if target_key in normalize_server_key(x["name"])), None)
+
+            if not s:
+                print(f"{RED}Server '{target}' not found.{RESET}")
+            elif cmd in ("open", "folder"):
                 open_server_location(s)
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd in ("uninstall", "remove", "delete") and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd in ("uninstall", "remove", "delete"):
                 uninstall_server(s)
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd == "restart" and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd == "restart":
                 restart_server(s)
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd in ("inspect", "info") and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd in ("inspect", "info"):
                 inspect_server_details(s, interactive=False)
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd == "kill" and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd == "kill":
                 killed = kill_server(s)
                 print(f"Killed '{s['name']}' (PIDs: {killed})")
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd == "start" and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd == "start":
                 pid = start_server(s)
                 print(f"Started '{s['name']}' (PID {pid})")
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd == "disable" and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd == "disable":
                 toggle_disable_server(s, force_state=True)
-            else:
-                print(f"Server '{target}' not found.")
-        elif cmd == "enable" and len(sys.argv) > 2:
-            target = sys.argv[2]
-            s = next((x for x in data["servers"] if canon_key(target) in canon_key(x["name"])), None)
-            if s:
+            elif cmd == "enable":
                 toggle_disable_server(s, force_state=False)
-            else:
-                print(f"Server '{target}' not found.")
         else:
             print("Usage:")
             print("  mcp-manager                 (Interactive menu)")
