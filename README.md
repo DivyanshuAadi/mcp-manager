@@ -1,4 +1,4 @@
-# ✦ MCP 360° ENGINE (v3.6)
+# ✦ MCP 360° ENGINE (v3.7)
 ### Sub-Second Responsive UI, Toggleable Machine Repos, Zero-Residue Clean Uninstall & File Explorer Opener
 
 A standalone, high-performance CLI utility for Windows styled after the **Claude Code CLI** (Anthropic Coral/Emerald palette, rounded box framing, and pixel-perfect ANSI alignment). 
@@ -7,7 +7,7 @@ Zero dependency on third-party daemon apps like MCP Router. Pure on-demand, non-
 
 ---
 
-## ⚡ What's New in v3.6: Machine Repos Toggle, Clean Uninstall & Explorer Opener
+## ⚡ What's New in v3.7: Machine Repos Toggle, Clean Uninstall & Explorer Opener
 
 1. **Toggleable Local Machine Repos (`[T]`)**:
    - Easily switch between **`Full 360° View`** (showing both configured agent servers and unconfigured downloaded repos on disk) and **`Compact View`** (configured coding agent servers only).
@@ -84,7 +84,7 @@ Double-click **`mcp-manager.bat`**:
 
 ```text
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│  ✦ MCP 360° ENGINE  v3.6 (Sub-Second UI & Universal Control)                                     ● FAST ENGINE ACTIVE  │
+│  ✦ MCP 360° ENGINE  v3.7 (Sub-Second UI & Universal Control)                                     ● FAST ENGINE ACTIVE  │
 │  Universal Coding Agent Inspector & Process Controller                                                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  Coding Agents  : Antigravity IDE, Claude Code, Claude Desktop, Claude Global │ View: Full (4 Local Repos Included) [T]
